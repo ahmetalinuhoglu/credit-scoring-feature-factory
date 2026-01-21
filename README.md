@@ -12,17 +12,90 @@ High-performance feature engineering library for credit scoring models. Generate
 
 ## 📊 Feature Categories
 
-| Category | Features | Description |
-|----------|----------|-------------|
-| Amount Features | 300+ | Sum, avg, max, min, std by product/window/status |
-| Count Features | 125 | Credit counts by multiple dimensions |
-| Ratio Features | 80+ | Portfolio composition ratios |
-| Temporal Features | 50+ | Credit age, history length, time to default |
-| Trend Features | 40+ | Credit velocity, growth trends |
-| Risk Signals | 20+ | Overdraft, overlimit, stress indicators |
-| Behavioral Features | 50+ | Default patterns, recovery rates |
-| Payment Features | 40+ | Monthly payments, DTI proxies |
-| And more... | 200+ | Diversity, complexity, anomaly features |
+The 941 features are organized into **7 main categories**:
+
+| # | Category | Features | Description |
+|---|----------|----------|-------------|
+| 1 | **📈 Volume & Amount** | 350+ | Credit counts, amounts, and aggregations (sum, avg, max, min, std) by product type, time window, and status |
+| 2 | **⏱️ Temporal & History** | 120+ | Credit age, history length, time-to-default, days since events, seasonal patterns |
+| 3 | **📊 Ratios & Composition** | 100+ | Portfolio mix ratios, product concentration, secured vs unsecured proportions |
+| 4 | **📉 Trends & Velocity** | 80+ | Credit growth trends, acquisition velocity, 6m vs 12m comparisons |
+| 5 | **⚠️ Risk & Default** | 150+ | Default counts, recovery rates, stress signals, overlimit/overdraft events, default severity |
+| 6 | **💳 Payment & Obligations** | 80+ | Monthly payments, remaining terms, DTI proxies, payment burden metrics |
+| 7 | **🔍 Behavioral & Patterns** | 60+ | Credit sequences, burst detection, product transitions, complexity scores, anomaly indicators |
+
+### Detailed Breakdown
+
+<details>
+<summary><b>1. Volume & Amount Features (350+)</b></summary>
+
+- **Count Features**: Total credits, active credits, closed credits by product
+- **Amount Aggregations**: Sum, average, max, min, std of credit amounts
+- **Dimensional Slicing**: By product type (IL, IS, CF, MG), time window (3m, 6m, 12m, 24m), status (active, defaulted, recovered)
+- **Examples**: `total_credit_count`, `installment_loan_total_amount_last_12m`, `mortgage_average_amount`
+</details>
+
+<details>
+<summary><b>2. Temporal & History Features (120+)</b></summary>
+
+- **Age Metrics**: Oldest credit age, newest credit age, average credit age
+- **History Length**: Credit history span in months
+- **Time-to-Event**: Days to default, recovery duration
+- **Recency**: Days since last credit, days since last default
+- **Examples**: `oldest_credit_age_months`, `days_since_last_default`, `avg_time_to_default_days`
+</details>
+
+<details>
+<summary><b>3. Ratios & Composition Features (100+)</b></summary>
+
+- **Product Mix**: Share of each product type in portfolio
+- **Secured Ratio**: Proportion of mortgages vs unsecured credits
+- **Concentration Metrics**: HHI index, diversity scores
+- **Amount Ratios**: Amount-weighted proportions
+- **Examples**: `secured_ratio`, `installment_loan_amt_to_total_ratio`, `product_diversity_ratio`
+</details>
+
+<details>
+<summary><b>4. Trends & Velocity Features (80+)</b></summary>
+
+- **Credit Velocity**: Rate of credit acquisition in recent periods
+- **Amount Velocity**: Rate of credit amount growth
+- **Period Comparisons**: 6m vs 12m trends, acceleration metrics
+- **Growth Patterns**: Increasing/decreasing credit activity
+- **Examples**: `credit_velocity_3m`, `amt_trend_6m_vs_12m`, `default_trend_6m_vs_12m`
+</details>
+
+<details>
+<summary><b>5. Risk & Default Features (150+)</b></summary>
+
+- **Default Counts**: Ever defaulted, multiple defaults, by product
+- **Recovery Metrics**: Recovery rate, recovery time
+- **Stress Signals**: Overdraft events, overlimit occurrences
+- **Default Severity**: Average/max default amounts
+- **Risk Flags**: Current default status, financial stress indicators
+- **Examples**: `default_count_ever`, `recovery_success_rate`, `has_overlimit`, `max_default_severity`
+</details>
+
+<details>
+<summary><b>6. Payment & Obligation Features (80+)</b></summary>
+
+- **Payment Metrics**: Total monthly payments, average payment
+- **Term Features**: Remaining term months, original term
+- **DTI Proxies**: Payment burden indicators
+- **Maturity Patterns**: Short-term vs long-term credit mix
+- **Examples**: `total_monthly_payment`, `avg_remaining_term_months`, `payment_to_amount_ratio`
+</details>
+
+<details>
+<summary><b>7. Behavioral & Pattern Features (60+)</b></summary>
+
+- **Sequence Patterns**: First/last product type, product transitions
+- **Burst Detection**: Multiple credits in short periods
+- **Interval Analysis**: Time between credit applications
+- **Complexity Scores**: Portfolio sophistication metrics
+- **Anomaly Indicators**: Unusual patterns in credit behavior
+- **Examples**: `first_product_installment_loan`, `credit_burst_3m`, `product_transition_count`
+</details>
 
 ## 🏗️ Architecture
 
