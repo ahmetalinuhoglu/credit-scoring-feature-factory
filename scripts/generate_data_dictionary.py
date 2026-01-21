@@ -191,11 +191,89 @@ def generate_data_dictionary():
         f.write(html)
     print(f"✓ Saved: {html_path}")
     
+    # Excel (xlsx) with category-based sheets
+    xlsx_path = output_dir / f'data_dictionary_{timestamp}.xlsx'
+    generate_excel(dictionary, CATEGORY_DEFINITIONS, features_by_category, xlsx_path)
+    print(f"✓ Saved: {xlsx_path}")
+    
     print("\n" + "=" * 60)
     print("✓ DATA DICTIONARY GENERATED SUCCESSFULLY!")
     print("=" * 60)
     
     return dictionary
+
+
+def generate_excel(dictionary, categories, features_by_category, output_path):
+    """Generate Excel data dictionary with category-based sheets."""
+    
+    category_order = [
+        'volume_amount', 'temporal_history', 'ratios_composition',
+        'trends_velocity', 'risk_default', 'payment_obligations', 'behavioral_patterns'
+    ]
+    
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        # Summary sheet
+        summary_data = []
+        for cat in category_order:
+            if cat in features_by_category:
+                cat_info = categories[cat]
+                summary_data.append({
+                    'Category Code': cat,
+                    'Category Name': cat_info['name'],
+                    'Description': cat_info['description'],
+                    'Feature Count': len(features_by_category[cat])
+                })
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.loc[len(summary_df)] = ['', 'TOTAL', '', summary_df['Feature Count'].sum()]
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # All features sheet
+        all_features = []
+        for f in dictionary['features']:
+            cat_info = categories.get(f['category'], {})
+            stats = f.get('statistics', {})
+            all_features.append({
+                'Feature Name': f['name'],
+                'Category': cat_info.get('name', f['category']),
+                'Data Type': f['data_type'],
+                'Null %': f['null_ratio'],
+                'Min': stats.get('min'),
+                'Max': stats.get('max'),
+                'Mean': stats.get('mean'),
+                'Std': stats.get('std'),
+                'Median': stats.get('median'),
+            })
+        
+        all_df = pd.DataFrame(all_features)
+        all_df.to_excel(writer, sheet_name='All Features', index=False)
+        
+        # Category-specific sheets
+        for cat in category_order:
+            if cat not in features_by_category:
+                continue
+            
+            cat_info = categories[cat]
+            feats = features_by_category[cat]
+            
+            cat_data = []
+            for f in sorted(feats, key=lambda x: x['name']):
+                stats = f.get('statistics', {})
+                cat_data.append({
+                    'Feature Name': f['name'],
+                    'Data Type': f['data_type'],
+                    'Null %': f['null_ratio'],
+                    'Min': stats.get('min'),
+                    'Max': stats.get('max'),
+                    'Mean': stats.get('mean'),
+                    'Std': stats.get('std'),
+                    'Median': stats.get('median'),
+                })
+            
+            cat_df = pd.DataFrame(cat_data)
+            # Truncate sheet name to 31 chars (Excel limit)
+            sheet_name = cat_info['name'][:31]
+            cat_df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
 def generate_html(dictionary, categories, features_by_category):
