@@ -1,0 +1,59 @@
+# Development Environment Configuration
+# Overrides base_config.yaml for development
+
+environment: dev
+
+# GCP Settings - Dev
+gcp:
+  project_id: credit-scoring-dev
+  
+  bigquery:
+    dataset: credit_data_dev
+    
+  storage:
+    bucket: credit-scoring-dev-bucket
+
+# Spark Settings - Local mode for dev
+spark:
+  master: "local[*]"
+  
+  config:
+    spark.executor.memory: 2g
+    spark.driver.memory: 2g
+    spark.sql.shuffle.partitions: 10
+
+# Data Sampling for faster development
+data:
+  sampling:
+    enabled: true
+    fraction: 0.1  # Use 10% of data
+    seed: 42
+    
+  # Date range for development
+  date_range:
+    start: "2025-01-01"
+    end: "2025-12-31"
+
+# Reduced training parameters for faster iteration
+training:
+  cross_validation:
+    n_folds: 3  # Reduced from 5
+    
+  tuning:
+    xgboost:
+      n_trials: 20  # Reduced from 100
+      timeout: 600  # 10 minutes
+      
+    logistic_regression:
+      # Smaller grid for dev
+      param_grid:
+        C: [0.1, 1.0, 10.0]
+        penalty: [l2]
+
+# Logging - More verbose for debugging
+logging:
+  level: DEBUG
+  
+  handlers:
+    console:
+      level: DEBUG

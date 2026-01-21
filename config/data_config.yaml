@@ -1,0 +1,175 @@
+# Data Configuration
+# Defines data sources, schemas, and validation rules
+
+# ═══════════════════════════════════════════════════════════════
+# DATA SOURCES
+# ═══════════════════════════════════════════════════════════════
+data_sources:
+  applications:
+    type: bigquery
+    table: applications
+    description: "Kredi başvuruları tablosu"
+    
+    # Partition/filter settings
+    partition_column: application_date
+    
+    # Key columns for joining
+    key_columns:
+      - application_id
+      - customer_id
+      
+  credit_bureau:
+    type: bigquery
+    table: credit_bureau
+    description: "Kredi bürosu verileri - başvuru anındaki açık krediler"
+    
+    # No partition, filtered by application
+    key_columns:
+      - application_id
+      - customer_id
+
+# ═══════════════════════════════════════════════════════════════
+# SCHEMA DEFINITIONS
+# ═══════════════════════════════════════════════════════════════
+schemas:
+  applications:
+    columns:
+      - name: application_id
+        type: string
+        nullable: false
+        description: "Unique başvuru ID"
+        
+      - name: customer_id
+        type: string
+        nullable: false
+        description: "Müşteri ID"
+        
+      - name: applicant_type
+        type: string
+        nullable: false
+        description: "Başvuru tipi: PRIMARY veya CO_APPLICANT"
+        allowed_values:
+          - PRIMARY
+          - CO_APPLICANT
+        
+      - name: application_date
+        type: date
+        nullable: false
+        description: "Başvuru tarihi"
+        
+      - name: target
+        type: integer
+        nullable: false
+        description: "Hedef değişken: 12 ay içinde batık oldu mu (0/1)"
+        allowed_values:
+          - 0
+          - 1
+          
+  credit_bureau:
+    columns:
+      - name: application_id
+        type: string
+        nullable: false
+        description: "Başvuru ID (FK to applications)"
+        
+      - name: customer_id
+        type: string
+        nullable: false
+        description: "Müşteri ID"
+        
+      - name: product_type
+        type: string
+        nullable: false
+        description: "Ürün tipi"
+        allowed_values:
+          - INSTALLMENT_LOAN
+          - INSTALLMENT_SALE
+          - CASH_FACILITY
+          - MORTGAGE
+          - NON_AUTH_OVERDRAFT
+          - OVERLIMIT
+        
+      - name: total_amount
+        type: float
+        nullable: false
+        description: "Kredi/borç tutarı"
+        min_value: 0
+        
+      - name: opening_date
+        type: date
+        nullable: false
+        description: "Kredi açılış tarihi"
+        
+      - name: default_date
+        type: date
+        nullable: true
+        description: "Batık tarihi (null = batık değil)"
+        
+      - name: recovery_date
+        type: date
+        nullable: true
+        description: "Batıktan çıkış tarihi (null = hala batık veya hiç batık olmadı)"
+
+# ═══════════════════════════════════════════════════════════════
+# PRODUCT TYPE DEFINITIONS
+# ═══════════════════════════════════════════════════════════════
+product_types:
+  # Gerçek kredi ürünleri
+  credit_products:
+    - INSTALLMENT_LOAN
+    - INSTALLMENT_SALE
+    - CASH_FACILITY
+    - MORTGAGE
+    
+  # Kredi değil ama önemli sinyal
+  non_credit_products:
+    - NON_AUTH_OVERDRAFT
+    - OVERLIMIT
+    
+  # Teminatlı ürünler
+  secured_products:
+    - MORTGAGE
+    
+  # Teminatsız ürünler
+  unsecured_products:
+    - INSTALLMENT_LOAN
+    - INSTALLMENT_SALE
+    - CASH_FACILITY
+    
+  # Revolving krediler
+  revolving_products:
+    - CASH_FACILITY
+
+  # Ürün bazlı beklenen batık oranları (sample data için)
+  expected_default_rates:
+    INSTALLMENT_LOAN: 0.06
+    INSTALLMENT_SALE: 0.20
+    CASH_FACILITY: 0.08
+    MORTGAGE: 0.01
+    NON_AUTH_OVERDRAFT: 0.0  # Not applicable
+    OVERLIMIT: 0.0  # Not applicable
+
+# ═══════════════════════════════════════════════════════════════
+# JOINT APPLICATION SETTINGS
+# ═══════════════════════════════════════════════════════════════
+joint_applications:
+  enabled: true
+  
+  # Her müşteri ayrı skorlanır
+  scoring_strategy: individual
+  
+  # Final karar için aggregation
+  aggregation:
+    method: min  # min, avg, weighted_avg
+    weights:
+      PRIMARY: 0.7
+      CO_APPLICANT: 0.3
+
+# ═══════════════════════════════════════════════════════════════
+# TARGET VARIABLE
+# ═══════════════════════════════════════════════════════════════
+target:
+  column: target
+  positive_class: 1  # 1 = default (batık)
+  negative_class: 0  # 0 = no default
+  observation_window_months: 12  # 12 ay içinde batık olma

@@ -1,0 +1,372 @@
+# Model Configuration
+# Defines model parameters, tuning settings, and evaluation metrics
+
+# ═══════════════════════════════════════════════════════════════
+# MODELS
+# ═══════════════════════════════════════════════════════════════
+models:
+  # ─────────────────────────────────────────────────────────────
+  # XGBOOST
+  # ─────────────────────────────────────────────────────────────
+  xgboost:
+    enabled: true
+    library: xgboost
+    framework: python  # Model eğitimi Pandas üzerinde
+    
+    default_params:
+      objective: binary:logistic
+      eval_metric:
+        - auc
+        - logloss
+      max_depth: 6
+      learning_rate: 0.1
+      n_estimators: 100
+      subsample: 0.8
+      colsample_bytree: 0.8
+      scale_pos_weight: auto  # Otomatik class balance
+      early_stopping_rounds: 10
+      random_state: 42
+      n_jobs: -1
+      verbosity: 1
+    
+    tuning:
+      enabled: true
+      method: optuna  # optuna | grid | bayesian
+      n_trials: 100
+      timeout: 3600  # 1 saat
+      
+      # Optuna param space
+      param_space:
+        max_depth:
+          type: int
+          low: 3
+          high: 10
+          
+        learning_rate:
+          type: float
+          low: 0.01
+          high: 0.3
+          log: true
+          
+        n_estimators:
+          type: int
+          low: 50
+          high: 500
+          step: 50
+          
+        subsample:
+          type: float
+          low: 0.5
+          high: 1.0
+          
+        colsample_bytree:
+          type: float
+          low: 0.5
+          high: 1.0
+          
+        min_child_weight:
+          type: int
+          low: 1
+          high: 10
+          
+        gamma:
+          type: float
+          low: 0
+          high: 5
+          
+        reg_alpha:
+          type: float
+          low: 0.0
+          high: 10.0
+          log: true
+          
+        reg_lambda:
+          type: float
+          low: 0.0
+          high: 10.0
+          log: true
+
+  # ─────────────────────────────────────────────────────────────
+  # LOGISTIC REGRESSION
+  # ─────────────────────────────────────────────────────────────
+  logistic_regression:
+    enabled: true
+    library: sklearn
+    framework: python
+    
+    default_params:
+      max_iter: 1000
+      solver: lbfgs
+      class_weight: balanced
+      penalty: l2
+      C: 1.0
+      random_state: 42
+      n_jobs: -1
+      verbose: 0
+    
+    tuning:
+      enabled: true
+      method: grid  # Logistic için grid search yeterli
+      
+      param_grid:
+        C:
+          - 0.001
+          - 0.01
+          - 0.1
+          - 1.0
+          - 10.0
+          - 100.0
+          
+        penalty:
+          - l1
+          - l2
+          - elasticnet
+          
+        solver:
+          - liblinear  # l1, l2
+          - saga       # l1, l2, elasticnet
+          - lbfgs      # l2 only
+          
+        l1_ratio:  # Only for elasticnet
+          - 0.0
+          - 0.25
+          - 0.5
+          - 0.75
+          - 1.0
+    
+    # ─────────────────────────────────────────────────────────────
+    # WoE BINNING (for Logistic Regression)
+    # ─────────────────────────────────────────────────────────────
+    woe_binning:
+      enabled: true
+      n_bins: 10
+      min_bin_size: 0.05       # Minimum 5% of data per bin
+      monotonic: true          # Enforce monotonic WoE
+      missing_bin: true        # Create separate bin for missing values
+      
+    # ─────────────────────────────────────────────────────────────
+    # SCORECARD SETTINGS
+    # ─────────────────────────────────────────────────────────────
+    scorecard:
+      enabled: true
+      pdo: 20                  # Points to Double Odds
+      base_score: 600          # Base score at base odds
+      base_odds: 50            # Base odds (good:bad = 50:1)
+      min_score: 300           # Minimum possible score
+      max_score: 850           # Maximum possible score
+      output_formats:
+        - excel
+        - json
+
+# ═══════════════════════════════════════════════════════════════
+# CALIBRATION SETTINGS
+# ═══════════════════════════════════════════════════════════════
+calibration:
+  enabled: true
+  methods:
+    - platt         # Sigmoid calibration
+    - isotonic      # Non-parametric
+    - temperature   # Temperature scaling
+  default_method: platt
+  
+  # Calibration metrics
+  metrics:
+    brier_score: true
+    ece: true                  # Expected Calibration Error
+    hosmer_lemeshow: true
+  
+  # Thresholds for calibration quality
+  thresholds:
+    brier_score_max: 0.25
+    ece_max: 0.10
+    hosmer_lemeshow_pvalue_min: 0.05
+
+# ═══════════════════════════════════════════════════════════════
+# CUTOFF OPTIMIZATION
+# ═══════════════════════════════════════════════════════════════
+cutoff_optimization:
+  enabled: true
+  
+  strategies:
+    - name: ks_optimal
+      description: Maximum KS separation
+      enabled: true
+      
+    - name: youden_j
+      description: Youden's J index (TPR - FPR)
+      enabled: true
+      
+    - name: cost_based
+      description: Minimize asymmetric costs
+      enabled: false
+      params:
+        cost_fn: 5.0           # Cost of false negative (missing a bad)
+        cost_fp: 1.0           # Cost of false positive (rejecting a good)
+      
+    - name: target_approval_rate
+      description: Hit target approval rate
+      enabled: true
+      params:
+        target_rates:
+          - 0.50
+          - 0.60
+          - 0.70
+          - 0.80
+      
+    - name: target_bad_rate
+      description: Hit target bad rate among approved
+      enabled: true
+      params:
+        target_rates:
+          - 0.03
+          - 0.05
+          - 0.10
+  
+  # Cutoff table generation
+  cutoff_table:
+    n_points: 20
+    include_metrics:
+      - approval_rate
+      - rejection_rate
+      - bad_rate_approved
+      - precision
+      - recall
+      - f1_score
+
+# ═══════════════════════════════════════════════════════════════
+# TRAINING CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+training:
+  # Train/Test split
+  test_size: 0.2
+  validation_size: 0.1  # Validation set for early stopping
+  stratify: true
+  random_state: 42
+  
+  # Spark -> Pandas conversion
+  max_rows_for_pandas: 1000000
+  sampling_strategy: stratified  # stratified | random
+
+# ═══════════════════════════════════════════════════════════════
+# CROSS-VALIDATION
+# ═══════════════════════════════════════════════════════════════
+cross_validation:
+  enabled: true
+  method: stratified_kfold
+  n_folds: 5
+  shuffle: true
+  random_state: 42
+
+# ═══════════════════════════════════════════════════════════════
+# FEATURE SELECTION
+# ═══════════════════════════════════════════════════════════════
+feature_selection:
+  methods:
+    - name: variance_threshold
+      enabled: true
+      params:
+        threshold: 0.01
+    
+    - name: correlation_filter
+      enabled: true
+      params:
+        max_correlation: 0.90
+        method: pearson
+        
+    - name: iv_selection
+      enabled: true
+      params:
+        min_iv: 0.02   # Useless < 0.02
+        max_iv: 0.50   # Suspicious > 0.50 (potential data leakage)
+        
+    - name: recursive_feature_elimination
+      enabled: false  # Opsiyonel, yavaş
+      params:
+        n_features_to_select: 50
+        step: 5
+  
+  # Ensemble voting
+  ensemble:
+    enabled: true
+    min_votes: 2  # Feature en az 2 method tarafından seçilmeli
+
+# ═══════════════════════════════════════════════════════════════
+# EVALUATION METRICS
+# ═══════════════════════════════════════════════════════════════
+evaluation:
+  # Primary metric for model comparison
+  primary_metric: gini_coefficient
+  
+  metrics:
+    - name: auc_roc
+      threshold: 0.70
+      description: Area Under ROC Curve
+      
+    - name: gini_coefficient
+      threshold: 0.40
+      description: Gini = 2 * AUC - 1, sektör standardı
+      
+    - name: ks_statistic
+      threshold: 0.30
+      description: Kolmogorov-Smirnov, max separation
+      
+    - name: precision_at_k
+      k_values:
+        - 0.05
+        - 0.10
+        - 0.20
+      description: En riskli %K'da precision
+      
+    - name: recall_at_k
+      k_values:
+        - 0.05
+        - 0.10
+        - 0.20
+      description: En riskli %K'da recall
+      
+    - name: lift
+      deciles: 10
+      description: Decile bazlı lift analizi
+      
+    - name: psi
+      threshold: 0.25
+      baseline: training
+      description: Population Stability Index
+      
+    - name: iv_total
+      description: Toplam Information Value
+      
+    - name: log_loss
+      description: Logarithmic Loss
+      
+    - name: brier_score
+      description: Brier Score for probability calibration
+
+  # Model comparison settings
+  comparison:
+    metrics:
+      - gini_coefficient
+      - ks_statistic
+      - auc_roc
+    generate_report: true
+    output_formats:
+      - html
+      - json
+
+# ═══════════════════════════════════════════════════════════════
+# MODEL ARTIFACTS
+# ═══════════════════════════════════════════════════════════════
+artifacts:
+  output_path: outputs/model_artifacts
+  
+  save:
+    model: true
+    feature_importance: true
+    predictions: true
+    probabilities: true
+    evaluation_report: true
+    
+  formats:
+    model: joblib  # joblib | pickle
+    data: parquet  # parquet | csv
+    report: html

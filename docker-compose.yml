@@ -1,0 +1,50 @@
+services:
+  spark-master:
+    image: apache/spark-py:latest
+    container_name: spark-master
+    user: root
+    ports:
+      - "8080:8080" # Spark Web UI
+      - "7077:7077" # Spark master port
+      - "4040:4040" # Spark application UI
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master
+    volumes:
+      - ./:/app
+      - ./data:/app/data:ro
+      - spark-master-work:/opt/spark/work
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    networks:
+      - spark-network
+
+  spark-worker:
+    image: apache/spark-py:latest
+    container_name: spark-worker
+    user: root
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081" # Worker Web UI
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=4
+      - SPARK_WORKER_WEBUI_PORT=8081
+    volumes:
+      - ./:/app
+      - ./data:/app/data:ro
+      - spark-worker-work:/opt/spark/work
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    networks:
+      - spark-network
+
+volumes:
+  spark-master-work:
+  spark-worker-work:
+
+
+networks:
+  spark-network:
+    driver: bridge

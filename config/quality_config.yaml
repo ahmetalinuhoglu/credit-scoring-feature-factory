@@ -1,0 +1,309 @@
+# Data Quality Configuration
+# Defines quality checks, thresholds, and reporting settings
+
+# ═══════════════════════════════════════════════════════════════
+# DATA QUALITY CHECKS
+# ═══════════════════════════════════════════════════════════════
+data_quality:
+  # Global settings
+  fail_on_critical_errors: true
+  generate_report: true
+  
+  checks:
+    # ─────────────────────────────────────────────────────────────
+    # NULL CHECKS
+    # ─────────────────────────────────────────────────────────────
+    null_checks:
+      severity: error
+      rules:
+        # Applications table
+        - table: applications
+          column: application_id
+          max_null_ratio: 0.0
+          
+        - table: applications
+          column: customer_id
+          max_null_ratio: 0.0
+          
+        - table: applications
+          column: application_date
+          max_null_ratio: 0.0
+          
+        - table: applications
+          column: target
+          max_null_ratio: 0.0
+          
+        # Credit bureau table
+        - table: credit_bureau
+          column: application_id
+          max_null_ratio: 0.0
+          
+        - table: credit_bureau
+          column: customer_id
+          max_null_ratio: 0.0
+          
+        - table: credit_bureau
+          column: product_type
+          max_null_ratio: 0.0
+          
+        - table: credit_bureau
+          column: total_amount
+          max_null_ratio: 0.0
+          
+        - table: credit_bureau
+          column: opening_date
+          max_null_ratio: 0.0
+
+    # ─────────────────────────────────────────────────────────────
+    # RANGE CHECKS
+    # ─────────────────────────────────────────────────────────────
+    range_checks:
+      severity: warning
+      rules:
+        - table: credit_bureau
+          column: total_amount
+          min: 0
+          max: 100000000  # 100M max
+          
+        - table: applications
+          column: target
+          min: 0
+          max: 1
+
+    # ─────────────────────────────────────────────────────────────
+    # DATE CONSISTENCY CHECKS
+    # ─────────────────────────────────────────────────────────────
+    date_checks:
+      severity: error
+      rules:
+        # opening_date should be before or equal to application_date
+        - table: credit_bureau
+          check: opening_date_before_application
+          condition: "opening_date <= application_date"
+          error_threshold: 0.01  # Max 1% violations
+          
+        # default_date should be after opening_date
+        - table: credit_bureau
+          check: default_after_opening
+          condition: "default_date IS NULL OR default_date >= opening_date"
+          error_threshold: 0.001
+          
+        # recovery_date should be after default_date
+        - table: credit_bureau
+          check: recovery_after_default
+          condition: "recovery_date IS NULL OR (default_date IS NOT NULL AND recovery_date >= default_date)"
+          error_threshold: 0.001
+
+    # ─────────────────────────────────────────────────────────────
+    # UNIQUENESS CHECKS
+    # ─────────────────────────────────────────────────────────────
+    uniqueness_checks:
+      severity: error
+      rules:
+        # Unique combination in applications (one row per customer per application)
+        - table: applications
+          columns:
+            - application_id
+            - customer_id
+          unique: true
+
+    # ─────────────────────────────────────────────────────────────
+    # REFERENTIAL INTEGRITY
+    # ─────────────────────────────────────────────────────────────
+    referential_checks:
+      severity: error
+      rules:
+        # Every credit bureau record should have a matching application
+        - child_table: credit_bureau
+          child_columns:
+            - application_id
+            - customer_id
+          parent_table: applications
+          parent_columns:
+            - application_id
+            - customer_id
+          orphan_threshold: 0.0
+
+    # ─────────────────────────────────────────────────────────────
+    # CATEGORICAL VALUE CHECKS
+    # ─────────────────────────────────────────────────────────────
+    categorical_checks:
+      severity: error
+      rules:
+        - table: credit_bureau
+          column: product_type
+          allowed_values:
+            - INSTALLMENT_LOAN
+            - INSTALLMENT_SALE
+            - CASH_FACILITY
+            - MORTGAGE
+            - NON_AUTH_OVERDRAFT
+            - OVERLIMIT
+            
+        - table: applications
+          column: applicant_type
+          allowed_values:
+            - PRIMARY
+            - CO_APPLICANT
+
+    # ─────────────────────────────────────────────────────────────
+    # DUPLICATE CHECKS
+    # ─────────────────────────────────────────────────────────────
+    duplicate_checks:
+      severity: warning
+      rules:
+        # Check for exact duplicate rows in credit bureau
+        - table: credit_bureau
+          columns: all
+          max_duplicate_ratio: 0.01
+
+# ═══════════════════════════════════════════════════════════════
+# FEATURE QUALITY CHECKS
+# ═══════════════════════════════════════════════════════════════
+feature_quality:
+  checks:
+    # ─────────────────────────────────────────────────────────────
+    # NULL RATIO CHECK
+    # ─────────────────────────────────────────────────────────────
+    null_ratio:
+      severity: warning
+      max_null_ratio: 0.50  # Features with >50% null are flagged
+      action: flag  # flag, drop, impute
+      
+    # ─────────────────────────────────────────────────────────────
+    # VARIANCE CHECK
+    # ─────────────────────────────────────────────────────────────
+    variance:
+      severity: info
+      min_variance: 0.001
+      action: flag
+      
+    # ─────────────────────────────────────────────────────────────
+    # CORRELATION CHECK
+    # ─────────────────────────────────────────────────────────────
+    correlation:
+      severity: warning
+      max_correlation: 0.95
+      method: pearson
+      action: flag
+      
+    # ─────────────────────────────────────────────────────────────
+    # INFORMATION VALUE CHECK
+    # ─────────────────────────────────────────────────────────────
+    information_value:
+      severity: info
+      thresholds:
+        useless: 0.02        # IV < 0.02
+        weak: 0.10           # 0.02 <= IV < 0.10
+        medium: 0.30         # 0.10 <= IV < 0.30
+        strong: 0.50         # 0.30 <= IV < 0.50
+        suspicious: 1.0      # IV >= 0.50 (possible data leakage)
+      
+      min_iv_for_selection: 0.02
+      max_iv_for_selection: 0.50  # Flag potential data leakage
+      
+    # ─────────────────────────────────────────────────────────────
+    # OUTLIER CHECK
+    # ─────────────────────────────────────────────────────────────
+    outliers:
+      severity: warning
+      method: iqr  # iqr, zscore, isolation_forest
+      iqr_multiplier: 3.0
+      zscore_threshold: 4.0
+      max_outlier_ratio: 0.05
+      action: flag
+
+# ═══════════════════════════════════════════════════════════════
+# UNIVARIATE ANALYSIS
+# ═══════════════════════════════════════════════════════════════
+univariate_analysis:
+  enabled: true
+  
+  thresholds:
+    missing_rate_max: 0.70     # Reject if missing > 70%
+    iv_min: 0.02               # Reject if IV < 0.02 (useless)
+    iv_max: 0.50               # Reject if IV > 0.50 (suspicious)
+    variance_min: 0.001        # Reject if near-constant
+    gini_min: 0.02             # Minimum univariate Gini
+    
+  # Output settings
+  output:
+    generate_report: true
+    output_path: outputs/univariate_reports
+    formats:
+      - html
+      - json
+      
+  # Feature recommendation
+  recommendation:
+    auto_reject: true          # Automatically reject failing features
+    require_approval: false    # Require manual approval for borderline
+
+# ═══════════════════════════════════════════════════════════════
+# PSI MONITORING (Population Stability Index)
+# ═══════════════════════════════════════════════════════════════
+psi_monitoring:
+  enabled: true
+  
+  # PSI thresholds
+  thresholds:
+    stable: 0.10               # PSI < 0.10: Stable, no action needed
+    warning: 0.25              # 0.10 <= PSI < 0.25: Warning, investigate
+    critical: 0.25             # PSI >= 0.25: Critical, retrain model
+    
+  # Monitoring settings
+  settings:
+    n_bins: 10                 # Number of bins for distribution
+    track_features: true       # Track feature distributions
+    track_score: true          # Track score distribution
+    
+  # Baseline management
+  baseline:
+    source: training           # training | validation | custom
+    save_path: outputs/psi_baselines
+    auto_update: false         # Auto-update baseline after retraining
+    
+  # Alerting
+  alerting:
+    enabled: false             # Disable for local development
+    channels:
+      - email
+    recipients:
+      - model-monitoring@example.com
+    
+  # Reporting
+  reporting:
+    generate_report: true
+    output_path: outputs/psi_reports
+    formats:
+      - html
+      - json
+    include_history: true
+
+# ═══════════════════════════════════════════════════════════════
+# QUALITY REPORTING
+# ═══════════════════════════════════════════════════════════════
+reporting:
+  output_path: outputs/quality_reports
+  
+  formats:
+    - html
+    - json
+    
+  include_sections:
+    - summary
+    - null_analysis
+    - range_violations
+    - date_consistency
+    - duplicates
+    - distribution_analysis
+    - correlation_matrix
+    - iv_analysis
+    
+  # Alert settings
+  alerts:
+    enabled: false  # Disable for local development
+    channels:
+      - email
+    recipients:
+      - data-quality@example.com

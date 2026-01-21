@@ -1,0 +1,70 @@
+# Production Environment Configuration
+# Overrides base_config.yaml for production
+
+environment: prod
+
+# GCP Settings - Production
+gcp:
+  project_id: credit-scoring-prod
+  
+  bigquery:
+    dataset: credit_data_prod
+    
+  storage:
+    bucket: credit-scoring-prod-bucket
+    
+  dataproc:
+    cluster_name: credit-scoring-prod-cluster
+    master_machine_type: n1-standard-8
+    worker_machine_type: n1-standard-8
+    num_workers: 4
+
+# Spark Settings - Full cluster mode
+spark:
+  master: yarn
+  
+  config:
+    spark.executor.memory: 8g
+    spark.driver.memory: 8g
+    spark.executor.cores: 4
+    spark.sql.shuffle.partitions: 400
+
+# No sampling in production
+data:
+  sampling:
+    enabled: false
+    
+  # Full date range
+  date_range:
+    start: "2020-01-01"
+    end: "2025-12-31"
+
+# Full training parameters
+training:
+  cross_validation:
+    n_folds: 5
+    
+  tuning:
+    xgboost:
+      n_trials: 100
+      timeout: 7200  # 2 hours
+      
+    logistic_regression:
+      # Full grid for production
+      param_grid:
+        C: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+        penalty: [l1, l2, elasticnet]
+        solver: [liblinear, saga]
+        l1_ratio: [0.0, 0.25, 0.5, 0.75, 1.0]
+
+# Logging - Production level
+logging:
+  level: INFO
+  
+  handlers:
+    console:
+      level: WARNING
+      
+    file:
+      enabled: true
+      level: INFO

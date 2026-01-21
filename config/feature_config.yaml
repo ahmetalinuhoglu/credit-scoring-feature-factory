@@ -1,0 +1,458 @@
+# Feature Engineering Configuration
+# Defines feature extraction rules and transformations
+
+# ═══════════════════════════════════════════════════════════════
+# PRODUCT TYPE DEFINITIONS
+# ═══════════════════════════════════════════════════════════════
+product_types:
+  # Gerçek kredi ürünleri
+  credit_products:
+    - INSTALLMENT_LOAN
+    - INSTALLMENT_SALE
+    - CASH_FACILITY
+    - MORTGAGE
+    
+  # Kredi değil ama önemli sinyal
+  non_credit_products:
+    - NON_AUTH_OVERDRAFT
+    - OVERLIMIT
+    
+  # Teminatlı ürünler
+  secured_products:
+    - MORTGAGE
+    
+  # Teminatsız ürünler  
+  unsecured_products:
+    - INSTALLMENT_LOAN
+    - INSTALLMENT_SALE
+    - CASH_FACILITY
+    
+  # Revolving krediler
+  revolving_products:
+    - CASH_FACILITY
+
+# ═══════════════════════════════════════════════════════════════
+# FEATURE ENGINEERING RULES
+# ═══════════════════════════════════════════════════════════════
+feature_engineering:
+
+  # ─────────────────────────────────────────────────────────────
+  # TUTAR BAZLI DEĞİŞKENLER
+  # ─────────────────────────────────────────────────────────────
+  amount_features:
+    - name: total_credit_amount
+      description: Toplam açık kredi tutarı (sadece kredi ürünleri)
+      aggregation: sum
+      column: total_amount
+      filter_credit_only: true
+      
+    - name: total_exposure
+      description: Toplam risk tutarı (tüm ürünler dahil)
+      aggregation: sum
+      column: total_amount
+      filter_credit_only: false
+      
+    - name: avg_credit_amount
+      description: Ortalama kredi tutarı
+      aggregation: mean
+      column: total_amount
+      filter_credit_only: true
+      
+    - name: max_credit_amount
+      description: En yüksek tek kredi tutarı
+      aggregation: max
+      column: total_amount
+      filter_credit_only: true
+      
+    - name: min_credit_amount
+      description: En düşük tek kredi tutarı
+      aggregation: min
+      column: total_amount
+      filter_credit_only: true
+      
+    - name: std_credit_amount
+      description: Kredi tutarı standart sapması
+      aggregation: std
+      column: total_amount
+      filter_credit_only: true
+
+  # ─────────────────────────────────────────────────────────────
+  # ÜRÜN TİPİ BAZLI DEĞİŞKENLER
+  # ─────────────────────────────────────────────────────────────
+  product_features:
+    # Her ürün tipi için aşağıdaki metrikler otomatik oluşturulur
+    generate_for_products:
+      - INSTALLMENT_LOAN
+      - INSTALLMENT_SALE
+      - CASH_FACILITY
+      - MORTGAGE
+      
+    metrics:
+      - suffix: _count
+        description: "{product} adet"
+        aggregation: count
+        
+      - suffix: _total_amount
+        description: "{product} toplam tutar"
+        aggregation: sum
+        column: total_amount
+        
+      - suffix: _avg_amount
+        description: "{product} ortalama tutar"
+        aggregation: mean
+        column: total_amount
+        
+      - suffix: _ratio
+        description: "{product} oranı (adet bazlı)"
+        type: derived
+        formula: "{product}_count / total_credit_count"
+        
+      - suffix: _amount_ratio
+        description: "{product} tutar oranı"
+        type: derived
+        formula: "{product}_total_amount / total_credit_amount"
+        
+      - suffix: _default_count
+        description: "{product} batık sayısı"
+        aggregation: count
+        filter: "default_date IS NOT NULL"
+
+  # ─────────────────────────────────────────────────────────────
+  # NON-CREDIT ÜRÜN SİNYALLERİ
+  # ─────────────────────────────────────────────────────────────
+  non_credit_signals:
+    - name: has_non_auth_overdraft
+      description: Yetkisiz hesap açığı var mı?
+      type: binary
+      condition: "product_type = 'NON_AUTH_OVERDRAFT'"
+      
+    - name: has_overlimit
+      description: Limit aşımı var mı?
+      type: binary
+      condition: "product_type = 'OVERLIMIT'"
+      
+    - name: non_auth_overdraft_count
+      description: Yetkisiz hesap açığı sayısı
+      aggregation: count
+      filter: "product_type = 'NON_AUTH_OVERDRAFT'"
+      
+    - name: overlimit_count
+      description: Limit aşımı sayısı
+      aggregation: count
+      filter: "product_type = 'OVERLIMIT'"
+      
+    - name: non_auth_overdraft_amount
+      description: Yetkisiz hesap açığı tutarı
+      aggregation: sum
+      column: total_amount
+      filter: "product_type = 'NON_AUTH_OVERDRAFT'"
+      
+    - name: overlimit_amount
+      description: Limit aşımı tutarı
+      aggregation: sum
+      column: total_amount
+      filter: "product_type = 'OVERLIMIT'"
+      
+    - name: financial_stress_flag
+      description: Finansal stres sinyali (overdraft veya overlimit var)
+      type: binary
+      condition: "has_non_auth_overdraft = 1 OR has_overlimit = 1"
+
+  # ─────────────────────────────────────────────────────────────
+  # ADET BAZLI DEĞİŞKENLER
+  # ─────────────────────────────────────────────────────────────
+  count_features:
+    - name: total_credit_count
+      description: Toplam açık kredi sayısı (sadece kredi ürünleri)
+      aggregation: count
+      filter_credit_only: true
+      
+    - name: total_record_count
+      description: Toplam kayıt sayısı (tüm ürünler)
+      aggregation: count
+      filter_credit_only: false
+      
+    - name: active_credit_count
+      description: Aktif (batık olmayan) kredi sayısı
+      aggregation: count
+      filter: "default_date IS NULL"
+      filter_credit_only: true
+      
+    - name: defaulted_credit_count
+      description: Şu an batık olan kredi sayısı
+      aggregation: count
+      filter: "default_date IS NOT NULL AND recovery_date IS NULL"
+      filter_credit_only: true
+      
+    - name: recovered_credit_count
+      description: Batıktan çıkmış kredi sayısı
+      aggregation: count
+      filter: "recovery_date IS NOT NULL"
+      filter_credit_only: true
+      
+    - name: ever_defaulted_count
+      description: Hiç batık olmuş kredi sayısı
+      aggregation: count
+      filter: "default_date IS NOT NULL"
+      filter_credit_only: true
+
+  # ─────────────────────────────────────────────────────────────
+  # BATIK DURUMU DEĞİŞKENLERİ
+  # ─────────────────────────────────────────────────────────────
+  default_features:
+    - name: has_current_default
+      description: Şu an batık kredisi var mı?
+      type: binary
+      condition: "defaulted_credit_count > 0"
+      
+    - name: has_ever_defaulted
+      description: Hiç batık olmuş mu?
+      type: binary
+      condition: "ever_defaulted_count > 0"
+      
+    - name: default_ratio
+      description: Batık kredi oranı
+      type: derived
+      formula: "defaulted_credit_count / NULLIF(total_credit_count, 0)"
+      default_value: 0
+      
+    - name: recovery_ratio
+      description: Batıktan kurtulan oran
+      type: derived
+      formula: "recovered_credit_count / NULLIF(ever_defaulted_count, 0)"
+      default_value: 0
+      
+    - name: total_defaulted_amount
+      description: Batık toplam tutar
+      aggregation: sum
+      column: total_amount
+      filter: "default_date IS NOT NULL AND recovery_date IS NULL"
+      filter_credit_only: true
+      
+    - name: default_amount_ratio
+      description: Batık tutar oranı
+      type: derived
+      formula: "total_defaulted_amount / NULLIF(total_credit_amount, 0)"
+      default_value: 0
+
+  # ─────────────────────────────────────────────────────────────
+  # ZAMAN BAZLI DEĞİŞKENLER
+  # ─────────────────────────────────────────────────────────────
+  temporal_features:
+    - name: oldest_credit_age_months
+      description: En eski kredinin yaşı (ay)
+      aggregation: max
+      type: age
+      date_column: opening_date
+      reference_column: application_date
+      filter_credit_only: true
+      
+    - name: newest_credit_age_months
+      description: En yeni kredinin yaşı (ay)
+      aggregation: min
+      type: age
+      date_column: opening_date
+      reference_column: application_date
+      filter_credit_only: true
+      
+    - name: avg_credit_age_months
+      description: Ortalama kredi yaşı (ay)
+      aggregation: mean
+      type: age
+      date_column: opening_date
+      reference_column: application_date
+      filter_credit_only: true
+      
+    - name: credit_history_length_months
+      description: Kredi geçmişi uzunluğu (ay)
+      type: alias
+      source: oldest_credit_age_months
+      
+    - name: avg_time_to_default_days
+      description: Ortalama batma süresi (gün)
+      aggregation: mean
+      type: duration
+      start_column: opening_date
+      end_column: default_date
+      filter: "default_date IS NOT NULL"
+      filter_credit_only: true
+      
+    - name: avg_recovery_time_days
+      description: Ortalama toparlanma süresi (gün)
+      aggregation: mean
+      type: duration
+      start_column: default_date
+      end_column: recovery_date
+      filter: "recovery_date IS NOT NULL"
+      filter_credit_only: true
+      
+    - name: days_since_last_default
+      description: Son batıktan bu yana geçen gün
+      aggregation: min
+      type: days_since
+      date_column: default_date
+      reference_column: application_date
+      filter: "default_date IS NOT NULL"
+      filter_credit_only: true
+
+  # ─────────────────────────────────────────────────────────────
+  # DÖNEMSEL DEĞİŞKENLER
+  # ─────────────────────────────────────────────────────────────
+  period_features:
+    periods:
+      - name: last_3m
+        months: 3
+      - name: last_6m
+        months: 6
+      - name: last_12m
+        months: 12
+      - name: last_24m
+        months: 24
+        
+    metrics:
+      - name: credits_opened_{period}
+        description: Son {months} ayda açılan kredi sayısı
+        aggregation: count
+        period_filter: opening_date
+        filter_credit_only: true
+        
+      - name: amount_opened_{period}
+        description: Son {months} ayda açılan kredi tutarı
+        aggregation: sum
+        column: total_amount
+        period_filter: opening_date
+        filter_credit_only: true
+        
+      - name: defaults_{period}
+        description: Son {months} ayda batık sayısı
+        aggregation: count
+        period_filter: default_date
+        filter: "default_date IS NOT NULL"
+        filter_credit_only: true
+        
+      - name: overdraft_events_{period}
+        description: Son {months} ayda overdraft/overlimit olayı
+        aggregation: count
+        period_filter: opening_date
+        filter: "product_type IN ('NON_AUTH_OVERDRAFT', 'OVERLIMIT')"
+        filter_credit_only: false
+
+  # ─────────────────────────────────────────────────────────────
+  # TREND DEĞİŞKENLERİ
+  # ─────────────────────────────────────────────────────────────
+  trend_features:
+    - name: credit_count_trend_6m_vs_12m
+      description: Son 6 ay vs önceki 6 ay kredi sayısı değişimi
+      type: trend
+      recent: credits_opened_last_6m
+      previous_formula: "credits_opened_last_12m - credits_opened_last_6m"
+      
+    - name: credit_amount_trend_6m_vs_12m
+      description: Son 6 ay vs önceki 6 ay tutar değişimi
+      type: trend
+      recent: amount_opened_last_6m
+      previous_formula: "amount_opened_last_12m - amount_opened_last_6m"
+      
+    - name: default_trend_6m_vs_12m
+      description: Batık trendi
+      type: trend_diff
+      recent: defaults_last_6m
+      previous_formula: "defaults_last_12m - defaults_last_6m"
+      
+    - name: credit_velocity
+      description: Kredi hızı (son 3 ay / toplam)
+      type: derived
+      formula: "credits_opened_last_3m / NULLIF(total_credit_count, 0)"
+      default_value: 0
+      
+    - name: amount_velocity
+      description: Tutar hızı (son 3 ay / toplam)
+      type: derived
+      formula: "amount_opened_last_3m / NULLIF(total_credit_amount, 0)"
+      default_value: 0
+
+  # ─────────────────────────────────────────────────────────────
+  # ORAN DEĞİŞKENLERİ
+  # ─────────────────────────────────────────────────────────────
+  ratio_features:
+    - name: secured_ratio
+      description: Teminatlı kredi oranı (mortgage / toplam)
+      type: derived
+      formula: "MORTGAGE_count / NULLIF(total_credit_count, 0)"
+      default_value: 0
+      
+    - name: secured_amount_ratio
+      description: Teminatlı kredi tutar oranı
+      type: derived
+      formula: "MORTGAGE_total_amount / NULLIF(total_credit_amount, 0)"
+      default_value: 0
+      
+    - name: revolving_ratio
+      description: Revolving kredi oranı (cash facility / toplam)
+      type: derived
+      formula: "CASH_FACILITY_count / NULLIF(total_credit_count, 0)"
+      default_value: 0
+      
+    - name: high_risk_product_ratio
+      description: Yüksek riskli ürün oranı (installment sale)
+      type: derived
+      formula: "INSTALLMENT_SALE_count / NULLIF(total_credit_count, 0)"
+      default_value: 0
+
+  # ─────────────────────────────────────────────────────────────
+  # ÇEŞİTLİLİK DEĞİŞKENLERİ
+  # ─────────────────────────────────────────────────────────────
+  diversity_features:
+    - name: distinct_product_count
+      description: Farklı ürün tipi sayısı (kredi ürünleri)
+      aggregation: count_distinct
+      column: product_type
+      filter_credit_only: true
+      
+    - name: product_diversity_ratio
+      description: Ürün çeşitliliği oranı
+      type: derived
+      formula: "distinct_product_count / 4.0"  # 4 kredi ürünü var
+      default_value: 0
+
+# ═══════════════════════════════════════════════════════════════
+# DATA DICTIONARY SETTINGS
+# ═══════════════════════════════════════════════════════════════
+data_dictionary:
+  auto_generate: true
+  
+  output_path: outputs/data_dictionary
+  
+  formats:
+    - yaml
+    - json
+    - html
+    - excel
+    
+  include:
+    - name
+    - description
+    - data_type
+    - source
+    - calculation
+    - statistics
+    - iv_score
+    - correlation_with_target
+    - category
+    - business_interpretation
+    
+  statistics:
+    numeric:
+      - min
+      - max
+      - mean
+      - median
+      - std
+      - null_count
+      - null_ratio
+      - percentiles: [1, 5, 25, 50, 75, 95, 99]
+      
+    categorical:
+      - value_counts
+      - null_count
+      - cardinality
