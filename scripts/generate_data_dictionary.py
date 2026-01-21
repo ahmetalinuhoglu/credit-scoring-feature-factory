@@ -116,6 +116,89 @@ def generate_data_dictionary():
             return 'temporal_history'
         return 'volume_amount'
     
+    def generate_description(feature: str) -> str:
+        """Generate human-readable description from feature name."""
+        feature_lower = feature.lower()
+        parts = []
+        
+        # Aggregation type
+        if 'total_' in feature_lower or '_sum' in feature_lower:
+            parts.append('Total')
+        elif 'avg_' in feature_lower or 'average' in feature_lower or '_mean' in feature_lower:
+            parts.append('Average')
+        elif 'max_' in feature_lower:
+            parts.append('Maximum')
+        elif 'min_' in feature_lower:
+            parts.append('Minimum')
+        elif 'std_' in feature_lower:
+            parts.append('Standard deviation of')
+        elif '_count' in feature_lower:
+            parts.append('Count of')
+        elif 'ratio' in feature_lower:
+            parts.append('Ratio of')
+        elif 'has_' in feature_lower:
+            parts.append('Flag indicating')
+        
+        # Product type
+        if 'installment_loan' in feature_lower or '_il_' in feature_lower:
+            parts.append('installment loan')
+        elif 'installment_sale' in feature_lower or '_is_' in feature_lower:
+            parts.append('installment sale')
+        elif 'cash_facility' in feature_lower or '_cf_' in feature_lower:
+            parts.append('cash facility')
+        elif 'mortgage' in feature_lower or '_mg_' in feature_lower:
+            parts.append('mortgage')
+        
+        # Status
+        if 'defaulted' in feature_lower or 'default' in feature_lower:
+            parts.append('defaulted credits')
+        elif 'active' in feature_lower:
+            parts.append('active credits')
+        elif 'recovered' in feature_lower:
+            parts.append('recovered credits')
+        
+        # Time window
+        if '_last_3m' in feature_lower or '_3m' in feature_lower:
+            parts.append('in last 3 months')
+        elif '_last_6m' in feature_lower or '_6m' in feature_lower:
+            parts.append('in last 6 months')
+        elif '_last_12m' in feature_lower or '_12m' in feature_lower:
+            parts.append('in last 12 months')
+        elif '_last_24m' in feature_lower or '_24m' in feature_lower:
+            parts.append('in last 24 months')
+        
+        # Special features
+        if 'velocity' in feature_lower:
+            parts.append('credit acquisition velocity')
+        elif 'trend' in feature_lower:
+            parts.append('trend indicator')
+        elif 'burst' in feature_lower:
+            parts.append('burst detection')
+        elif 'interval' in feature_lower:
+            parts.append('time interval between credits')
+        elif 'age_months' in feature_lower:
+            parts.append('credit age in months')
+        elif 'days_since' in feature_lower:
+            parts.append('days since event')
+        elif 'payment' in feature_lower:
+            parts.append('payment amount')
+        elif 'overdraft' in feature_lower:
+            parts.append('overdraft event')
+        elif 'overlimit' in feature_lower:
+            parts.append('overlimit event')
+        elif 'severity' in feature_lower:
+            parts.append('severity measure')
+        elif 'diversity' in feature_lower:
+            parts.append('product diversity')
+        elif 'concentration' in feature_lower:
+            parts.append('concentration measure')
+        
+        if parts:
+            return ' '.join(parts).capitalize()
+        
+        # Fallback: convert feature name to readable format
+        return feature.replace('_', ' ').title()
+    
     # Build dictionary
     dictionary = {
         'metadata': {
@@ -134,6 +217,7 @@ def generate_data_dictionary():
         
         feature_info = {
             'name': col,
+            'description': generate_description(col),
             'category': get_category(col),
             'data_type': 'integer' if series.dtype in [np.int64, np.int32] else 'float',
             'null_count': int(series.isna().sum()),
@@ -235,6 +319,7 @@ def generate_excel(dictionary, categories, features_by_category, output_path):
             stats = f.get('statistics', {})
             all_features.append({
                 'Feature Name': f['name'],
+                'Description': f.get('description', ''),
                 'Category': cat_info.get('name', f['category']),
                 'Data Type': f['data_type'],
                 'Null %': f['null_ratio'],
@@ -261,6 +346,7 @@ def generate_excel(dictionary, categories, features_by_category, output_path):
                 stats = f.get('statistics', {})
                 cat_data.append({
                     'Feature Name': f['name'],
+                    'Description': f.get('description', ''),
                     'Data Type': f['data_type'],
                     'Null %': f['null_ratio'],
                     'Min': stats.get('min'),
