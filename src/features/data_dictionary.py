@@ -339,28 +339,102 @@ class DataDictionaryGenerator(SparkComponent):
         
         return feature.replace('_', ' ').title()
     
+    # 7 Main Feature Categories
+    CATEGORY_DEFINITIONS = {
+        'volume_amount': {
+            'name': 'Volume & Amount',
+            'emoji': '📈',
+            'description': 'Credit counts, amounts, and aggregations by product type, time window, and status',
+            'keywords': ['amount', 'count', 'total', 'sum', 'exposure', '_amt', '_cnt']
+        },
+        'temporal_history': {
+            'name': 'Temporal & History', 
+            'emoji': '⏱️',
+            'description': 'Credit age, history length, time-to-default, days since events',
+            'keywords': ['age', 'months', 'days', 'oldest', 'newest', 'history', 'since', 'time_to', 'duration', 'maturity', 'term', 'seasonal']
+        },
+        'ratios_composition': {
+            'name': 'Ratios & Composition',
+            'emoji': '📊', 
+            'description': 'Portfolio mix ratios, product concentration, secured vs unsecured proportions',
+            'keywords': ['ratio', 'proportion', 'share', 'concentration', 'hhi', 'diversity', 'secured', 'unsecured', 'revolving']
+        },
+        'trends_velocity': {
+            'name': 'Trends & Velocity',
+            'emoji': '📉',
+            'description': 'Credit growth trends, acquisition velocity, period comparisons',
+            'keywords': ['trend', 'velocity', 'growth', 'acceleration', 'vs_', '_vs_']
+        },
+        'risk_default': {
+            'name': 'Risk & Default',
+            'emoji': '⚠️',
+            'description': 'Default counts, recovery rates, stress signals, default severity',
+            'keywords': ['default', 'recovery', 'overdraft', 'overlimit', 'stress', 'risk', 'severity', 'ever_defaulted', 'current_default']
+        },
+        'payment_obligations': {
+            'name': 'Payment & Obligations',
+            'emoji': '💳',
+            'description': 'Monthly payments, remaining terms, DTI proxies, payment burden',
+            'keywords': ['payment', 'obligation', 'burden', 'dti', 'installment', 'remaining']
+        },
+        'behavioral_patterns': {
+            'name': 'Behavioral & Patterns',
+            'emoji': '🔍',
+            'description': 'Credit sequences, burst detection, product transitions, anomalies',
+            'keywords': ['sequence', 'burst', 'transition', 'pattern', 'first_product', 'last_product', 'anomaly', 'complexity', 'freshness', 'interval']
+        }
+    }
+    
     def _get_category(self, feature: str) -> str:
-        """Categorize feature based on name."""
+        """
+        Categorize feature based on name using 7 main categories.
+        
+        Categories:
+        1. volume_amount - Credit counts, amounts, aggregations
+        2. temporal_history - Age, history, time metrics
+        3. ratios_composition - Portfolio ratios, concentrations
+        4. trends_velocity - Growth trends, velocity metrics
+        5. risk_default - Default, recovery, stress signals
+        6. payment_obligations - Payments, terms, burden
+        7. behavioral_patterns - Sequences, patterns, anomalies
+        """
         feature_lower = feature.lower()
         
-        if 'amount' in feature_lower or 'exposure' in feature_lower:
-            return 'amount'
-        elif 'count' in feature_lower:
-            return 'count'
-        elif 'ratio' in feature_lower:
-            return 'ratio'
-        elif 'default' in feature_lower:
-            return 'default'
-        elif any(p.lower() in feature_lower for p in ['installment', 'cash', 'mortgage']):
-            return 'product'
-        elif 'age' in feature_lower or 'months' in feature_lower or 'days' in feature_lower:
-            return 'temporal'
-        elif 'trend' in feature_lower or 'velocity' in feature_lower:
-            return 'trend'
-        elif 'overdraft' in feature_lower or 'overlimit' in feature_lower:
-            return 'non_credit_signal'
-        else:
-            return 'other'
+        # Check categories in priority order (more specific first)
+        
+        # 5. Risk & Default (check first as it's most important)
+        if any(kw in feature_lower for kw in ['default', 'recovery', 'overdraft', 'overlimit', 'stress', 'severity']):
+            return 'risk_default'
+        
+        # 6. Payment & Obligations
+        if any(kw in feature_lower for kw in ['payment', 'obligation', 'burden', 'dti']):
+            return 'payment_obligations'
+        
+        # 7. Behavioral & Patterns
+        if any(kw in feature_lower for kw in ['sequence', 'burst', 'transition', 'first_product', 'last_product', 
+                                               'anomaly', 'complexity', 'freshness', 'interval', 'pattern']):
+            return 'behavioral_patterns'
+        
+        # 4. Trends & Velocity
+        if any(kw in feature_lower for kw in ['trend', 'velocity', 'growth', 'acceleration', '_vs_']):
+            return 'trends_velocity'
+        
+        # 3. Ratios & Composition
+        if any(kw in feature_lower for kw in ['ratio', 'proportion', 'share', 'concentration', 'hhi', 
+                                               'diversity', 'secured', 'unsecured', 'revolving']):
+            return 'ratios_composition'
+        
+        # 2. Temporal & History
+        if any(kw in feature_lower for kw in ['age', 'months', 'days', 'oldest', 'newest', 'history', 
+                                               'since', 'time_to', 'duration', 'maturity', 'term', 'seasonal']):
+            return 'temporal_history'
+        
+        # 1. Volume & Amount (default for count/amount features)
+        if any(kw in feature_lower for kw in ['amount', 'count', 'total', 'sum', 'exposure', '_amt', '_cnt']):
+            return 'volume_amount'
+        
+        # Default to volume_amount for unclassified features
+        return 'volume_amount'
     
     def _simplify_dtype(self, dtype: str) -> str:
         """Simplify Spark data type to readable format."""
@@ -448,77 +522,183 @@ class DataDictionaryGenerator(SparkComponent):
         return output_files
     
     def _generate_html(self, dictionary: Dict[str, Any]) -> str:
-        """Generate HTML data dictionary."""
+        """Generate HTML data dictionary grouped by 7 main categories."""
+        
+        # Group features by category
+        features_by_category = {}
+        for feature in dictionary['features']:
+            cat = feature.get('category', 'volume_amount')
+            if cat not in features_by_category:
+                features_by_category[cat] = []
+            features_by_category[cat].append(feature)
+        
+        # Category order and styling
+        category_order = [
+            'volume_amount', 'temporal_history', 'ratios_composition',
+            'trends_velocity', 'risk_default', 'payment_obligations', 'behavioral_patterns'
+        ]
+        
+        category_colors = {
+            'volume_amount': '#4CAF50',
+            'temporal_history': '#2196F3',
+            'ratios_composition': '#9C27B0',
+            'trends_velocity': '#FF9800',
+            'risk_default': '#f44336',
+            'payment_obligations': '#00BCD4',
+            'behavioral_patterns': '#795548'
+        }
         
         html = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Data Dictionary</title>
+    <title>Data Dictionary - Credit Scoring Features</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 1400px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
-        h1 { color: #333; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
-        .meta { background: #e3f2fd; padding: 15px; border-radius: 8px; margin: 20px 0; }
-        table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 0.9em; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #f5f5f5; font-weight: bold; position: sticky; top: 0; }
-        tr:hover { background: #f9f9f9; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1600px; margin: 0 auto; }
+        h1 { color: #333; text-align: center; margin-bottom: 30px; }
+        .meta { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; margin: 20px 0; }
+        .meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; text-align: center; }
+        .meta-item { background: rgba(255,255,255,0.2); padding: 15px; border-radius: 8px; }
+        .meta-value { font-size: 2em; font-weight: bold; }
+        .meta-label { font-size: 0.9em; opacity: 0.9; }
+        
+        .category-nav { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0; justify-content: center; }
+        .category-btn { padding: 10px 20px; border-radius: 20px; color: white; text-decoration: none; font-weight: bold; transition: transform 0.2s; }
+        .category-btn:hover { transform: scale(1.05); }
+        
+        .category-section { background: white; border-radius: 12px; margin: 20px 0; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .category-header { padding: 20px; color: white; }
+        .category-header h2 { margin: 0 0 5px 0; }
+        .category-header p { margin: 0; opacity: 0.9; font-size: 0.95em; }
+        .category-count { background: rgba(255,255,255,0.3); padding: 5px 15px; border-radius: 20px; float: right; font-weight: bold; }
+        
+        table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #f8f9fa; font-weight: 600; position: sticky; top: 0; }
+        tr:hover { background: #f5f5f5; }
+        
         .iv-useless { color: #999; }
         .iv-weak { color: #ff9800; }
-        .iv-medium { color: #2196F3; }
+        .iv-medium { color: #2196F3; font-weight: 500; }
         .iv-strong { color: #4CAF50; font-weight: bold; }
         .iv-suspicious { color: #f44336; font-weight: bold; }
-        .category { background: #e8e8e8; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; }
+        
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.8em; font-weight: 500; }
+        .badge-float { background: #e3f2fd; color: #1976D2; }
+        .badge-integer { background: #e8f5e9; color: #388E3C; }
+        
+        code { background: #f5f5f5; padding: 2px 6px; border-radius: 4px; font-family: 'Monaco', monospace; font-size: 0.85em; }
+        
+        .footer { text-align: center; padding: 20px; color: #666; font-size: 0.9em; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📖 Data Dictionary</h1>
+        <h1>📖 Credit Scoring Feature Dictionary</h1>
+        
         <div class="meta">
-            <strong>Generated:</strong> """ + dictionary['metadata']['generated_at'] + """<br>
-            <strong>Total Features:</strong> """ + str(dictionary['metadata']['total_features']) + """<br>
-            <strong>Total Rows:</strong> """ + f"{dictionary['metadata']['total_rows']:,}" + """
+            <div class="meta-grid">
+                <div class="meta-item">
+                    <div class="meta-value">""" + str(dictionary['metadata']['total_features']) + """</div>
+                    <div class="meta-label">Total Features</div>
+                </div>
+                <div class="meta-item">
+                    <div class="meta-value">""" + str(len(features_by_category)) + """</div>
+                    <div class="meta-label">Categories</div>
+                </div>
+                <div class="meta-item">
+                    <div class="meta-value">""" + f"{dictionary['metadata']['total_rows']:,}" + """</div>
+                    <div class="meta-label">Training Rows</div>
+                </div>
+                <div class="meta-item">
+                    <div class="meta-value">""" + dictionary['metadata']['generated_at'][:10] + """</div>
+                    <div class="meta-label">Generated Date</div>
+                </div>
+            </div>
         </div>
         
-        <table>
-            <tr>
-                <th>Feature</th>
-                <th>Description</th>
-                <th>Type</th>
-                <th>Category</th>
-                <th>Null %</th>
-                <th>IV Score</th>
-                <th>IV Category</th>
-                <th>Mean</th>
-                <th>Std</th>
-            </tr>
+        <div class="category-nav">
 """
         
-        for feature in dictionary['features']:
-            iv_class = f"iv-{feature.get('iv_category', 'unknown')}"
-            iv_score = f"{feature.get('iv_score', 0):.4f}" if feature.get('iv_score') else "N/A"
+        # Generate category navigation
+        for cat in category_order:
+            if cat in features_by_category:
+                cat_info = self.CATEGORY_DEFINITIONS.get(cat, {})
+                color = category_colors.get(cat, '#666')
+                count = len(features_by_category[cat])
+                html += f'''<a href="#{cat}" class="category-btn" style="background: {color};">
+                    {cat_info.get('emoji', '📋')} {cat_info.get('name', cat)} ({count})
+                </a>'''
+        
+        html += """</div>"""
+        
+        # Generate category sections
+        for cat in category_order:
+            if cat not in features_by_category:
+                continue
+                
+            cat_info = self.CATEGORY_DEFINITIONS.get(cat, {})
+            color = category_colors.get(cat, '#666')
+            features = features_by_category[cat]
             
-            stats = feature.get('statistics', {})
-            mean = f"{stats.get('mean', 0):.2f}" if stats.get('mean') is not None else "N/A"
-            std = f"{stats.get('std', 0):.2f}" if stats.get('std') is not None else "N/A"
+            html += f'''
+        <div class="category-section" id="{cat}">
+            <div class="category-header" style="background: {color};">
+                <span class="category-count">{len(features)} features</span>
+                <h2>{cat_info.get('emoji', '📋')} {cat_info.get('name', cat)}</h2>
+                <p>{cat_info.get('description', '')}</p>
+            </div>
+            <table>
+                <tr>
+                    <th>Feature Name</th>
+                    <th>Description</th>
+                    <th>Type</th>
+                    <th>Null %</th>
+                    <th>IV Score</th>
+                    <th>IV Category</th>
+                    <th>Mean</th>
+                    <th>Min</th>
+                    <th>Max</th>
+                </tr>
+'''
             
-            html += f"""
-            <tr>
-                <td><code>{feature['name']}</code></td>
-                <td>{feature.get('description', '')}</td>
-                <td>{feature.get('data_type', '')}</td>
-                <td><span class="category">{feature.get('category', '')}</span></td>
-                <td>{feature.get('null_ratio', 0):.1%}</td>
-                <td>{iv_score}</td>
-                <td class="{iv_class}">{feature.get('iv_category', 'N/A')}</td>
-                <td>{mean}</td>
-                <td>{std}</td>
-            </tr>
-"""
+            # Sort features by IV score within category
+            sorted_features = sorted(features, key=lambda x: x.get('iv_score') or 0, reverse=True)
+            
+            for feature in sorted_features:
+                iv_class = f"iv-{feature.get('iv_category', 'unknown')}"
+                iv_score = f"{feature.get('iv_score', 0):.4f}" if feature.get('iv_score') else "N/A"
+                
+                stats = feature.get('statistics', {})
+                mean_val = f"{stats.get('mean', 0):.2f}" if stats.get('mean') is not None else "N/A"
+                min_val = f"{stats.get('min', 0):.2f}" if stats.get('min') is not None else "N/A"
+                max_val = f"{stats.get('max', 0):.2f}" if stats.get('max') is not None else "N/A"
+                
+                dtype = feature.get('data_type', '')
+                dtype_class = 'badge-integer' if dtype == 'integer' else 'badge-float'
+                
+                html += f'''
+                <tr>
+                    <td><code>{feature['name']}</code></td>
+                    <td>{feature.get('description', '')}</td>
+                    <td><span class="badge {dtype_class}">{dtype}</span></td>
+                    <td>{feature.get('null_ratio', 0):.1%}</td>
+                    <td>{iv_score}</td>
+                    <td class="{iv_class}">{feature.get('iv_category', 'N/A')}</td>
+                    <td>{mean_val}</td>
+                    <td>{min_val}</td>
+                    <td>{max_val}</td>
+                </tr>
+'''
+            
+            html += """</table></div>"""
         
         html += """
-        </table>
+        <div class="footer">
+            <p>Generated by Credit Scoring Feature Factory | 
+            <a href="https://github.com/ahmetalinuhoglu/credit-scoring-feature-factory">GitHub</a></p>
+        </div>
     </div>
 </body>
 </html>
