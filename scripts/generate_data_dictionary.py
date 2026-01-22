@@ -37,17 +37,23 @@ def generate_data_dictionary():
     # Initialize factory
     factory = FeatureFactory(config)
     
-    # Load sample data
-    data_dir = project_root / 'data' / 'sample'
-    apps_df = pd.read_csv(data_dir / 'sample_applications.csv').head(100)
-    bureau_df = pd.read_csv(data_dir / 'sample_credit_bureau.csv')
-    
-    print(f"Loaded {len(apps_df)} applications, {len(bureau_df)} bureau records")
-    
-    # Generate features
-    print("\n[Step 1] Generating features...")
-    features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True)
-    print(f"Generated {features_df.shape[1]} features for {features_df.shape[0]} applications")
+    # Try to load pre-generated features, or generate from sample
+    features_parquet = project_root / 'outputs' / 'features' / 'features_full.parquet'
+    if features_parquet.exists():
+        print(f"Loading pre-generated features from {features_parquet}")
+        features_df = pd.read_parquet(features_parquet)
+        print(f"Loaded {features_df.shape[1]} features for {features_df.shape[0]} applications")
+    else:
+        # Fallback: Generate from sample data
+        data_dir = project_root / 'data' / 'sample'
+        apps_df = pd.read_csv(data_dir / 'sample_applications.csv')
+        bureau_df = pd.read_csv(data_dir / 'sample_credit_bureau.csv')
+        
+        print(f"Loaded {len(apps_df)} applications, {len(bureau_df)} bureau records")
+        
+        print("\n[Step 1] Generating features...")
+        features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True)
+        print(f"Generated {features_df.shape[1]} features for {features_df.shape[0]} applications")
     
     # Get feature names (excluding ID columns)
     exclude_cols = {'application_id', 'customer_id', 'applicant_type', 'application_date', 'target'}
