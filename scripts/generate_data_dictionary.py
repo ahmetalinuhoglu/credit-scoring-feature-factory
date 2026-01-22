@@ -669,6 +669,28 @@ def generate_data_dictionary():
         if 'regularity' in name:
             return True
         
+        # Skewness - requires >= 3 values
+        if 'skewness' in name:
+            return True
+        
+        # Time since features - undefined when event never happened
+        if 'time_since_last' in name or 'time_since' in name:
+            return True
+        if 'recovery_to_new' in name:
+            return True
+        if 'days_clean_before' in name:
+            return True
+        
+        # Default age features - undefined when no defaults
+        if 'default_age' in name:
+            return True
+        
+        # Median, range, max_to, min_to - undefined when no data
+        if 'median' in name or 'amount_range' in name:
+            return True
+        if '_to_avg' in name or '_to_max' in name or '_to_min' in name:
+            return True
+        
         return False
     
     # Build dictionary

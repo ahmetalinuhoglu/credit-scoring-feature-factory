@@ -1881,7 +1881,7 @@ class FeatureFactory:
         features = self._add_sequence_features_optimized(features, credit_data, _cache)
         
         # Generate size pattern features
-        features = self._add_size_pattern_features(features, credit_data)
+        features = self._add_amount_features(features, credit_data)
         
         # Generate burst features (uses cache)
         features = self._add_burst_features_optimized(features, credit_data, _cache)
@@ -2197,41 +2197,43 @@ class FeatureFactory:
         defaulted = credit_data[credit_data['default_date'].notna()]
         recovered = credit_data[credit_data['recovery_date'].notna()]
         
-        # Time to default statistics
+        # Time to default statistics - NaN if never defaulted
         if len(defaulted) > 0:
             ttd = (defaulted['default_date'] - defaulted['opening_date']).dt.days
             features['min_time_to_default_days'] = ttd.min()
             features['max_time_to_default_days'] = ttd.max()
-            features['std_time_to_default_days'] = ttd.std() if len(ttd) > 1 else 0
+            features['std_time_to_default_days'] = ttd.std() if len(ttd) > 1 else np.nan
         else:
-            features['min_time_to_default_days'] = 0
-            features['max_time_to_default_days'] = 0
-            features['std_time_to_default_days'] = 0
+            # Never defaulted - these are undefined, not 0
+            features['min_time_to_default_days'] = np.nan
+            features['max_time_to_default_days'] = np.nan
+            features['std_time_to_default_days'] = np.nan
         
-        # Recovery time statistics
+        # Recovery time statistics - NaN if no recoveries
         if len(recovered) > 0:
             rec_time = (recovered['recovery_date'] - recovered['default_date']).dt.days
             features['min_recovery_time_days'] = rec_time.min()
             features['max_recovery_time_days'] = rec_time.max()
         else:
-            features['min_recovery_time_days'] = 0
-            features['max_recovery_time_days'] = 0
+            # Never recovered - these are undefined, not 0
+            features['min_recovery_time_days'] = np.nan
+            features['max_recovery_time_days'] = np.nan
         
-        # Recovery success rate
+        # Recovery success rate - NaN if no defaults
         default_cnt = len(defaulted)
-        features['recovery_success_rate'] = len(recovered) / default_cnt if default_cnt > 0 else 0
+        features['recovery_success_rate'] = len(recovered) / default_cnt if default_cnt > 0 else np.nan
         
-        # Credit maturity
+        # Credit maturity - NaN if no credits
         total_cnt = len(credit_data)
         if total_cnt > 0 and 'opening_date' in credit_data.columns:
             ages = (ref_date - credit_data['opening_date']).dt.days / 30.44
             features['mature_credit_ratio'] = (ages > 24).sum() / total_cnt
             features['new_credit_ratio'] = (ages < 6).sum() / total_cnt
         else:
-            features['mature_credit_ratio'] = 0
-            features['new_credit_ratio'] = 0
+            features['mature_credit_ratio'] = np.nan
+            features['new_credit_ratio'] = np.nan
         
-        # Product-specific time-to-default
+        # Product-specific time-to-default - NaN if no defaults for that product
         for product in self.PRODUCT_TYPES[1:]:
             prod_code = product.filter_expr.split("'")[1] if product.filter_expr else None
             if prod_code:
@@ -2242,9 +2244,10 @@ class FeatureFactory:
                     features[f'{product.code}_time_to_default_max_days'] = ttd.max()
                     features[f'{product.code}_time_to_default_avg_days'] = ttd.mean()
                 else:
-                    features[f'{product.code}_time_to_default_min_days'] = 0
-                    features[f'{product.code}_time_to_default_max_days'] = 0
-                    features[f'{product.code}_time_to_default_avg_days'] = 0
+                    # No defaults for this product - undefined, not 0
+                    features[f'{product.code}_time_to_default_min_days'] = np.nan
+                    features[f'{product.code}_time_to_default_max_days'] = np.nan
+                    features[f'{product.code}_time_to_default_avg_days'] = np.nan
         
         return features
     
@@ -2343,28 +2346,38 @@ class FeatureFactory:
         
         return features
     
-    def _add_size_pattern_features(
+    def _add_amount_features(
         self,
         features: Dict[str, Any],
         credit_data: pd.DataFrame
     ) -> Dict[str, Any]:
-        """Add credit size pattern features."""
+        """Add credit size pattern features.
+        
+        Semantic rules:
+        - Counts and flags: 0 is valid (no credits matching criteria)
+        - Ratios: NaN when denominator is 0
+        - Averages: NaN when no data
+        - CV/std: NaN when 0 or 1 data points
+        - Skewness: NaN when < 3 data points
+        """
         if len(credit_data) == 0 or 'total_amount' not in credit_data.columns:
+            # Flags and counts can be 0
             features['has_small_credit'] = 0
             features['has_large_credit'] = 0
             features['has_very_large_credit'] = 0
             features['small_credit_count'] = 0
             features['large_credit_count'] = 0
-            features['small_credit_ratio'] = 0
-            features['large_credit_ratio'] = 0
-            features['max_to_avg_amount_ratio'] = 0
-            features['max_to_min_amount_ratio'] = 0
-            features['amount_coefficient_of_variation'] = 0
-            features['amount_range'] = 0
-            features['median_credit_amount'] = 0
-            features['amount_skewness'] = 0
+            # Ratios and stats are undefined
+            features['small_credit_ratio'] = np.nan
+            features['large_credit_ratio'] = np.nan
+            features['max_to_avg_amount_ratio'] = np.nan
+            features['max_to_min_amount_ratio'] = np.nan
+            features['amount_coefficient_of_variation'] = np.nan
+            features['amount_range'] = np.nan
+            features['median_credit_amount'] = np.nan
+            features['amount_skewness'] = np.nan
             for product in self.PRODUCT_TYPES[1:]:
-                features[f'{product.code}_avg_amount'] = 0
+                features[f'{product.code}_avg_amount'] = np.nan
             return features
         
         amounts = credit_data['total_amount']
@@ -2378,27 +2391,27 @@ class FeatureFactory:
         large_cnt = (amounts > 50000).sum()
         features['small_credit_count'] = small_cnt
         features['large_credit_count'] = large_cnt
-        features['small_credit_ratio'] = small_cnt / total_cnt if total_cnt > 0 else 0
-        features['large_credit_ratio'] = large_cnt / total_cnt if total_cnt > 0 else 0
+        features['small_credit_ratio'] = small_cnt / total_cnt  # total_cnt > 0 guaranteed
+        features['large_credit_ratio'] = large_cnt / total_cnt
         
         avg_amt = amounts.mean()
         max_amt = amounts.max()
         min_amt = amounts.min()
-        std_amt = amounts.std()
+        std_amt = amounts.std() if total_cnt > 1 else np.nan
         
-        features['max_to_avg_amount_ratio'] = max_amt / avg_amt if avg_amt > 0 else 0
-        features['max_to_min_amount_ratio'] = max_amt / min_amt if min_amt > 0 else 0
-        features['amount_coefficient_of_variation'] = std_amt / avg_amt if avg_amt > 0 else 0
+        features['max_to_avg_amount_ratio'] = max_amt / avg_amt if avg_amt > 0 else np.nan
+        features['max_to_min_amount_ratio'] = max_amt / min_amt if min_amt > 0 else np.nan
+        features['amount_coefficient_of_variation'] = std_amt / avg_amt if avg_amt > 0 and pd.notna(std_amt) else np.nan
         features['amount_range'] = max_amt - min_amt
         features['median_credit_amount'] = amounts.median()
-        features['amount_skewness'] = amounts.skew() if len(amounts) > 2 else 0
+        features['amount_skewness'] = amounts.skew() if total_cnt > 2 else np.nan
         
-        # Product-specific averages
+        # Product-specific averages - NaN if no credits for that product
         for product in self.PRODUCT_TYPES[1:]:
             prod_code = product.filter_expr.split("'")[1] if product.filter_expr else None
             if prod_code:
                 prod_data = credit_data[credit_data['product_type'] == prod_code]
-                features[f'{product.code}_avg_amount'] = prod_data['total_amount'].mean() if len(prod_data) > 0 else 0
+                features[f'{product.code}_avg_amount'] = prod_data['total_amount'].mean() if len(prod_data) > 0 else np.nan
         
         return features
     
@@ -2543,19 +2556,20 @@ class FeatureFactory:
                 features['is_accelerating'] = 0
                 features['is_decelerating'] = 0
         else:
-            features['avg_inter_credit_days'] = 0
-            features['min_inter_credit_days'] = 0
-            features['max_inter_credit_days'] = 0
-            features['std_inter_credit_days'] = 0
-            features['median_inter_credit_days'] = 0
-            features['inter_credit_cv'] = 0
-            features['has_rapid_succession'] = 0
-            features['rapid_succession_count'] = 0
-            features['longest_credit_gap_days'] = 0
-            features['recent_vs_historical_interval'] = 0
-            features['interval_trend'] = 0
-            features['is_accelerating'] = 0
-            features['is_decelerating'] = 0
+            # Only 0 or 1 credit - intervals are undefined
+            features['avg_inter_credit_days'] = np.nan
+            features['min_inter_credit_days'] = np.nan
+            features['max_inter_credit_days'] = np.nan
+            features['std_inter_credit_days'] = np.nan
+            features['median_inter_credit_days'] = np.nan
+            features['inter_credit_cv'] = np.nan
+            features['has_rapid_succession'] = 0  # Binary flag - 0 is valid
+            features['rapid_succession_count'] = 0  # Count - 0 is valid
+            features['longest_credit_gap_days'] = np.nan
+            features['recent_vs_historical_interval'] = np.nan
+            features['interval_trend'] = np.nan
+            features['is_accelerating'] = 0  # Binary flag - 0 is valid
+            features['is_decelerating'] = 0  # Binary flag - 0 is valid
         
         # By product
         for product in self.PRODUCT_TYPES[1:]:
@@ -2567,7 +2581,8 @@ class FeatureFactory:
                     prod_intervals = [(prod_dates[i+1] - prod_dates[i]).days for i in range(len(prod_dates)-1)]
                     features[f'{product.code}_avg_interval_days'] = np.mean(prod_intervals)
                 else:
-                    features[f'{product.code}_avg_interval_days'] = 0
+                    # Only 1 credit - interval is undefined
+                    features[f'{product.code}_avg_interval_days'] = np.nan
         
         return features
     
@@ -2712,16 +2727,17 @@ class FeatureFactory:
     ) -> Dict[str, Any]:
         """Add relative and percentile-based features."""
         if len(credit_data) == 0 or 'opening_date' not in credit_data.columns:
-            features['latest_amount_vs_average'] = 0
-            features['latest_amount_vs_max'] = 0
-            features['is_largest_credit_recent'] = 0
-            features['is_smallest_credit_recent'] = 0
-            features['amount_growth_rate'] = 0
-            features['credit_count_growth_rate'] = 0
-            features['default_rate_trend'] = 0
-            features['amount_percentile_latest'] = 0
-            features['recency_of_max_amount'] = 0
-            features['latest_vs_first_amount_ratio'] = 0
+            # Ratio features are undefined when no data
+            features['latest_amount_vs_average'] = np.nan
+            features['latest_amount_vs_max'] = np.nan
+            features['is_largest_credit_recent'] = 0  # Binary - 0 is valid
+            features['is_smallest_credit_recent'] = 0  # Binary - 0 is valid
+            features['amount_growth_rate'] = np.nan
+            features['credit_count_growth_rate'] = np.nan
+            features['default_rate_trend'] = np.nan
+            features['amount_percentile_latest'] = np.nan
+            features['recency_of_max_amount'] = np.nan
+            features['latest_vs_first_amount_ratio'] = np.nan
             return features
         
         sorted_data = credit_data.sort_values('opening_date')
@@ -2815,12 +2831,12 @@ class FeatureFactory:
         # Complexity score (0-10)
         features['portfolio_complexity_score'] = min(10, unique_products * 2 + entropy * 2)
         
-        # Regularity (inverse CV)
+        # Regularity (inverse CV) - NaN if CV is NaN
         cv = features.get('amount_coefficient_of_variation', 0)
-        features['amount_regularity'] = 1 / (1 + cv)
+        features['amount_regularity'] = 1 / (1 + cv) if pd.notna(cv) else np.nan
         
         cv_interval = features.get('inter_credit_cv', 0)
-        features['credit_frequency_regularity'] = 1 / (1 + cv_interval)
+        features['credit_frequency_regularity'] = 1 / (1 + cv_interval) if pd.notna(cv_interval) else np.nan
         
         return features
     
@@ -2895,16 +2911,16 @@ class FeatureFactory:
         recovered = credit_data[credit_data['recovery_date'].notna()]
         
         if len(credit_data) == 0 or 'opening_date' not in credit_data.columns:
-            features['credits_after_first_recovery'] = 0
-            features['defaulted_again_after_recovery'] = 0
-            features['days_clean_before_first_default'] = 0
-            features['time_since_last_recovery_days'] = 0
-            features['recovery_to_new_credit_days'] = 0
-            features['multiple_recovery_cycles'] = 0
-            features['recovery_cycle_count'] = len(recovered)
-            features['clean_after_recovery'] = 0
-            features['first_default_age_months'] = 0
-            features['last_default_age_months'] = 0
+            features['credits_after_first_recovery'] = 0  # Count - 0 valid
+            features['defaulted_again_after_recovery'] = 0  # Binary - 0 valid
+            features['days_clean_before_first_default'] = np.nan  # Time undefined
+            features['time_since_last_recovery_days'] = np.nan  # Time undefined
+            features['recovery_to_new_credit_days'] = np.nan  # Time undefined
+            features['multiple_recovery_cycles'] = 0  # Binary - 0 valid
+            features['recovery_cycle_count'] = 0  # Count - 0 valid
+            features['clean_after_recovery'] = 0  # Binary - 0 valid
+            features['first_default_age_months'] = np.nan  # Age undefined
+            features['last_default_age_months'] = np.nan  # Age undefined
             return features
         
         # Recovery cycle count
