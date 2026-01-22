@@ -321,25 +321,121 @@ def parse_args():
     parser.add_argument("--bq-dataset", required=True, help="BigQuery dataset name")
     parser.add_argument("--gcs-bucket", required=True, help="GCS bucket name (without gs://)")
     
-    # Optional arguments
+    # Table configuration - Option 1: Separate tables
+    parser.add_argument("--applications-table", default=None,
+                        help="BigQuery table name for applications (use with --bureau-table)")
+    parser.add_argument("--bureau-table", default=None,
+                        help="BigQuery table name for bureau/credit data (use with --applications-table)")
+    
+    # Table configuration - Option 2: Pre-joined table
+    parser.add_argument("--joined-table", default=None,
+                        help="BigQuery table name for pre-joined data (applications + bureau)")
+    
+    # Column mapping for custom field names
+    parser.add_argument("--column-mapping", default=None,
+                        help="""JSON string to map your column names to expected names.
+Example: '{"musteri_no": "customer_id", "basvuru_tarihi": "application_date", "kredi_tutari": "total_amount"}'
+
+Expected columns for applications:
+  - customer_id, application_id, application_date, applicant_type, target
+
+Expected columns for bureau/credit:
+  - customer_id, application_id, product_type, total_amount, opening_date,
+    default_date, recovery_date, monthly_payment, remaining_term_months, closure_date
+""")
+    
+    # Other arguments
     parser.add_argument("--output-path", default="features/output", 
                         help="Output path within the GCS bucket")
-    parser.add_argument("--applications-table", default="applications",
-                        help="BigQuery table name for applications")
-    parser.add_argument("--bureau-table", default="bureau",
-                        help="BigQuery table name for bureau/credit data")
     parser.add_argument("--config-path", default="gs://",
                         help="Path to feature_config.yaml (GCS or local)")
     parser.add_argument("--date-filter", default=None,
                         help="Optional date filter (e.g., 'application_date >= \"2024-01-01\"')")
-    parser.add_argument("--mode", choices=["distributed", "simple"], default="distributed",
+    parser.add_argument("--mode", choices=["distributed", "simple"], default="simple",
                         help="Processing mode: distributed (pandas_udf) or simple (collect)")
     parser.add_argument("--num-partitions", type=int, default=200,
                         help="Number of partitions for distributed mode")
     parser.add_argument("--save-format", choices=["parquet", "csv", "json"], default="parquet",
                         help="Output format")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Validate table arguments
+    if args.joined_table:
+        if args.applications_table or args.bureau_table:
+            parser.error("Cannot use --joined-table with --applications-table or --bureau-table")
+    else:
+        if not (args.applications_table and args.bureau_table):
+            # Default to separate tables
+            args.applications_table = args.applications_table or "applications"
+            args.bureau_table = args.bureau_table or "bureau"
+    
+    return args
+
+
+def apply_column_mapping(df: DataFrame, column_mapping: dict) -> DataFrame:
+    """
+    Rename columns in DataFrame based on mapping.
+    
+    Args:
+        df: Spark DataFrame
+        column_mapping: Dict mapping source names to expected names
+                       e.g., {"musteri_no": "customer_id", "basvuru_tarihi": "application_date"}
+    
+    Returns:
+        DataFrame with renamed columns
+    """
+    if not column_mapping:
+        return df
+    
+    logger.info(f"Applying column mapping: {column_mapping}")
+    
+    for source_name, target_name in column_mapping.items():
+        if source_name in df.columns:
+            df = df.withColumnRenamed(source_name, target_name)
+            logger.info(f"  Renamed: {source_name} -> {target_name}")
+        else:
+            logger.warning(f"  Column not found: {source_name}")
+    
+    return df
+
+
+def split_joined_data(joined_df: DataFrame) -> tuple:
+    """
+    Split pre-joined data into applications and bureau DataFrames.
+    
+    Args:
+        joined_df: Pre-joined DataFrame with both application and bureau columns
+        
+    Returns:
+        Tuple of (applications_df, bureau_df)
+    """
+    # Application columns - these define unique applications
+    app_cols = ['customer_id', 'application_id', 'application_date', 'applicant_type', 'target']
+    available_app_cols = [c for c in app_cols if c in joined_df.columns]
+    
+    # Bureau columns - credit history data
+    bureau_cols = [
+        'customer_id', 'application_id', 'product_type', 'total_amount', 
+        'opening_date', 'default_date', 'recovery_date', 'monthly_payment',
+        'remaining_term_months', 'closure_date', 'duration_months'
+    ]
+    available_bureau_cols = [c for c in bureau_cols if c in joined_df.columns]
+    
+    logger.info(f"Available application columns: {available_app_cols}")
+    logger.info(f"Available bureau columns: {available_bureau_cols}")
+    
+    # Extract unique applications
+    applications_df = joined_df.select(available_app_cols).distinct()
+    
+    # Extract bureau data (may have multiple rows per application)
+    bureau_df = joined_df.select(available_bureau_cols)
+    
+    app_count = applications_df.count()
+    bureau_count = bureau_df.count()
+    logger.info(f"Split data: {app_count:,} applications, {bureau_count:,} bureau records")
+    
+    return applications_df, bureau_df
 
 
 def load_config(config_path: str, spark: SparkSession) -> dict:
@@ -401,16 +497,45 @@ def main():
         config = load_config(args.config_path, spark)
         logger.info(f"Loaded configuration with {len(config.get('product_types', []))} product types")
         
-        # Read data from BigQuery
-        applications_df = read_from_bigquery(
-            spark, args.project_id, args.bq_dataset, 
-            args.applications_table, args.date_filter
-        )
+        # Parse column mapping if provided
+        column_mapping = None
+        if args.column_mapping:
+            import json
+            column_mapping = json.loads(args.column_mapping)
+            logger.info(f"Using column mapping with {len(column_mapping)} mappings")
         
-        bureau_df = read_from_bigquery(
-            spark, args.project_id, args.bq_dataset,
-            args.bureau_table
-        )
+        # Read data from BigQuery
+        if args.joined_table:
+            # Option 2: Pre-joined table
+            logger.info(f"Reading pre-joined data from: {args.joined_table}")
+            joined_df = read_from_bigquery(
+                spark, args.project_id, args.bq_dataset,
+                args.joined_table, args.date_filter
+            )
+            
+            # Apply column mapping if provided
+            if column_mapping:
+                joined_df = apply_column_mapping(joined_df, column_mapping)
+            
+            # Split into applications and bureau
+            applications_df, bureau_df = split_joined_data(joined_df)
+        else:
+            # Option 1: Separate tables
+            logger.info(f"Reading separate tables: {args.applications_table}, {args.bureau_table}")
+            applications_df = read_from_bigquery(
+                spark, args.project_id, args.bq_dataset, 
+                args.applications_table, args.date_filter
+            )
+            
+            bureau_df = read_from_bigquery(
+                spark, args.project_id, args.bq_dataset,
+                args.bureau_table
+            )
+            
+            # Apply column mapping if provided
+            if column_mapping:
+                applications_df = apply_column_mapping(applications_df, column_mapping)
+                bureau_df = apply_column_mapping(bureau_df, column_mapping)
         
         # Generate features
         if args.mode == "distributed":
