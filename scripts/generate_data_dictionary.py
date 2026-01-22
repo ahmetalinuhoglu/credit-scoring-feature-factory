@@ -578,6 +578,93 @@ def generate_data_dictionary():
         """Generate description using DescriptionGenerator class."""
         return DescriptionGenerator.generate(feature)
     
+    def get_variable_type(feature_name: str, series: pd.Series) -> str:
+        """
+        Classify a feature as binary, ordinal, or continuous.
+        
+        Returns:
+            'binary' - Only 0/1 values (flags)
+            'ordinal' - Discrete counts or categories
+            'continuous' - Continuous numeric values
+        """
+        name = feature_name.lower()
+        
+        # First, check if it's a ratio or amount - these are always continuous
+        if '_ratio' in name or 'amount' in name or 'monthly_payment' in name:
+            return 'continuous'
+        
+        # Binary flags - check by name pattern
+        binary_patterns = [
+            'has_', 'flag', 
+            'first_product_', 'last_product_',
+            'moved_to_', 'same_product_'
+        ]
+        # Note: 'is_' is excluded because it conflicts with installment_sale prefix
+        for pattern in binary_patterns:
+            if pattern in name:
+                # Verify by checking actual values
+                unique_vals = series.dropna().unique()
+                if len(unique_vals) <= 2 and all(v in [0, 1, 0.0, 1.0] for v in unique_vals):
+                    return 'binary'
+        
+        # Count variables - discrete integers
+        count_patterns = ['_count', 'cnt_', 'num_', 'distinct_', 'streak']
+        for pattern in count_patterns:
+            if pattern in name:
+                return 'ordinal'
+        
+        # If all values are small integers (0-10), likely ordinal
+        unique_vals = series.dropna().unique()
+        if len(unique_vals) > 0 and len(unique_vals) <= 10:
+            if all(float(v).is_integer() for v in unique_vals if pd.notna(v)):
+                if series.max() <= 10:
+                    return 'ordinal'
+        
+        # Everything else is continuous
+        return 'continuous'
+    
+    def should_allow_missing(feature_name: str) -> bool:
+        """
+        Determine if a feature should logically allow missing values.
+        
+        Some features have different semantics for 0 vs missing:
+        - days_since_last_default: 0 = just defaulted, NaN = never defaulted
+        - recovery_time: NaN if never defaulted (no recovery possible)
+        - ratio features: NaN if denominator is 0
+        """
+        name = feature_name.lower()
+        
+        # Features that should be NaN when condition not met
+        nan_when_absent = [
+            'days_since_last_default',  # NaN if never defaulted
+            'days_since_last_recovery', # NaN if never recovered
+            'avg_time_to_default',      # NaN if never defaulted
+            'avg_recovery_time',        # NaN if never defaulted or never recovered
+            'min_time_to_default',
+            'max_time_to_default',
+            'std_time_to_default',
+            'min_recovery_time',
+            'max_recovery_time',
+        ]
+        
+        for pattern in nan_when_absent:
+            if pattern in name:
+                return True
+        
+        # Ratio features - can be NaN if denominator is 0
+        if '_ratio' in name:
+            return True
+        
+        # Std features - can be NaN if only 1 value
+        if '_std' in name or name.endswith('std'):
+            return True
+        
+        # Mean/avg features - can be NaN if no values
+        if 'avg_' in name or 'average' in name or '_mean' in name:
+            return True
+        
+        return False
+    
     # Build dictionary
     dictionary = {
         'metadata': {
@@ -598,6 +685,8 @@ def generate_data_dictionary():
             'name': col,
             'description': generate_description(col),
             'category': get_category(col),
+            'variable_type': get_variable_type(col, series),  # binary, ordinal, continuous
+            'allows_missing': should_allow_missing(col),       # True if NaN is semantically valid
             'data_type': 'integer' if series.dtype in [np.int64, np.int32] else 'float',
             'null_count': int(series.isna().sum()),
             'null_ratio': round(series.isna().mean(), 4),
@@ -700,6 +789,8 @@ def generate_excel(dictionary, categories, features_by_category, output_path):
                 'Feature Name': f['name'],
                 'Description': f.get('description', ''),
                 'Category': cat_info.get('name', f['category']),
+                'Variable Type': f.get('variable_type', 'continuous'),
+                'Allows Missing': 'Yes' if f.get('allows_missing', False) else 'No',
                 'Data Type': f['data_type'],
                 'Null %': f['null_ratio'],
                 'Min': stats.get('min'),
@@ -726,6 +817,8 @@ def generate_excel(dictionary, categories, features_by_category, output_path):
                 cat_data.append({
                     'Feature Name': f['name'],
                     'Description': f.get('description', ''),
+                    'Variable Type': f.get('variable_type', 'continuous'),
+                    'Allows Missing': 'Yes' if f.get('allows_missing', False) else 'No',
                     'Data Type': f['data_type'],
                     'Null %': f['null_ratio'],
                     'Min': stats.get('min'),
