@@ -220,7 +220,8 @@ class FeatureFactory:
         credit_bureau_df: pd.DataFrame,
         reference_date_col: str = 'application_date',
         parallel: bool = False,
-        n_jobs: int = 4
+        n_jobs: int = 4,
+        fill_missing: bool = True
     ) -> pd.DataFrame:
         """
         Generate all features from applications and credit bureau data.
@@ -231,6 +232,9 @@ class FeatureFactory:
             reference_date_col: Column to use as reference date for time calculations
             parallel: If True, use multiprocessing for feature generation (local dev only)
             n_jobs: Number of parallel workers (only used if parallel=True)
+            fill_missing: If True (default), fill NaN values with 0 for model compatibility.
+                         If False, preserve NaN values to maintain semantic meaning
+                         (e.g., days_since_last_default=NaN means "never defaulted")
             
         Returns:
             DataFrame with one row per (application_id, customer_id) and all generated features
@@ -245,13 +249,18 @@ class FeatureFactory:
                 bureau_copy[col] = pd.to_datetime(bureau_copy[col], errors='coerce')
         
         if parallel:
-            return self._generate_features_parallel(
+            result_df = self._generate_features_parallel(
                 applications_df, bureau_copy, reference_date_col, n_jobs
             )
         else:
-            return self._generate_features_vectorized(
+            result_df = self._generate_features_vectorized(
                 applications_df, bureau_copy, reference_date_col
             )
+        
+        # Optionally fill missing values (default for model compatibility)
+        if fill_missing:
+            return result_df.fillna(0)
+        return result_df
     
     def _generate_features_vectorized(
         self,
@@ -291,7 +300,7 @@ class FeatureFactory:
             )
             results.append(feature_row)
         
-        return pd.DataFrame(results).fillna(0)
+        return pd.DataFrame(results)
     
     def _generate_features_parallel(
         self,
@@ -343,7 +352,7 @@ class FeatureFactory:
                 tasks
             )
         
-        return pd.DataFrame(results).fillna(0)
+        return pd.DataFrame(results)
     
     def _process_single_application(
         self,
@@ -1981,27 +1990,48 @@ class FeatureFactory:
         return filtered
     
     def _add_ratio_features(self, features: Dict[str, Any]) -> Dict[str, Any]:
-        """Add ratio features based on existing counts and amounts."""
-        total_cnt = features.get('all_all_all_cnt', 0)
-        total_amt = features.get('all_all_all_sum_amt', 0)
+        """Add ratio features based on existing counts and amounts.
         
-        # Product ratios
-        for product in self.PRODUCT_TYPES[1:]:
-            prod_cnt = features.get(f'{product.code}_all_all_cnt', 0)
-            prod_amt = features.get(f'{product.code}_all_all_sum_amt', 0)
+        Uses NaN when denominator is 0 (ratio is undefined, not 0).
+        """
+        # Use the actual generated feature names
+        total_cnt = features.get('total_credit_count', 0)
+        total_amt = features.get('total_credit_amount', 0)
+        
+        # Product ratios (using correct feature names from the generator)
+        product_to_feature = {
+            'il': 'installment_loan',
+            'is': 'installment_sale', 
+            'cf': 'cash_facility',
+            'mg': 'mortgage'
+        }
+        
+        for code, prod_name in product_to_feature.items():
+            # Try different possible feature name patterns
+            prod_cnt = features.get(f'{prod_name}_count', 0)
+            prod_amt = features.get(f'{prod_name}_total_amount', 0)
             
-            features[f'{product.code}_to_total_ratio'] = prod_cnt / total_cnt if total_cnt > 0 else 0
-            features[f'{product.code}_amt_to_total_ratio'] = prod_amt / total_amt if total_amt > 0 else 0
+            # Also try alternative names
+            if prod_cnt == 0:
+                prod_cnt = features.get(f'{prod_name}_all_all_cnt', 0)
+            if prod_amt == 0:
+                prod_amt = features.get(f'{prod_name}_all_all_sum_amt', 0)
+            
+            # Use NaN when denominator is 0 (undefined ratio)
+            features[f'{code}_to_total_ratio'] = prod_cnt / total_cnt if total_cnt > 0 else np.nan
+            features[f'{code}_amt_to_total_ratio'] = prod_amt / total_amt if total_amt > 0 else np.nan
         
         # Status ratios
         for status in self.STATUS_FILTERS[1:]:
-            status_cnt = features.get(f'all_all_{status.code}_cnt', 0)
-            features[f'{status.code}_ratio'] = status_cnt / total_cnt if total_cnt > 0 else 0
+            status_cnt = features.get(f'{status.code}_count', 0)
+            features[f'{status.code}_ratio'] = status_cnt / total_cnt if total_cnt > 0 else np.nan
         
         # Time window concentration
         for window in self.TIME_WINDOWS[1:]:
-            window_cnt = features.get(f'all_{window.code}_all_cnt', 0)
-            features[f'{window.code}_concentration_ratio'] = window_cnt / total_cnt if total_cnt > 0 else 0
+            window_cnt = features.get(f'count_{window.code}', 0)
+            if window_cnt == 0:
+                window_cnt = features.get(f'{window.code}_count', 0)
+            features[f'{window.code}_concentration_ratio'] = window_cnt / total_cnt if total_cnt > 0 else np.nan
         
         return features
     
@@ -2011,54 +2041,62 @@ class FeatureFactory:
         credit_data: pd.DataFrame,
         ref_date: datetime
     ) -> Dict[str, Any]:
-        """Add temporal features."""
+        """Add temporal features.
+        
+        Uses NaN (not 0) when a feature is semantically undefined:
+        - days_since_last_default = NaN when customer has never defaulted
+        - avg_time_to_default_days = NaN when no defaults exist
+        - avg_recovery_time_days = NaN when no recoveries exist
+        """
         if len(credit_data) == 0 or 'opening_date' not in credit_data.columns:
-            features['oldest_credit_age_months'] = 0
-            features['newest_credit_age_months'] = 0
-            features['avg_credit_age_months'] = 0
-            features['credit_history_length_months'] = 0
-            features['days_since_last_default'] = 0
-            features['days_since_last_credit'] = 0
-            features['avg_time_to_default_days'] = 0
-            features['avg_recovery_time_days'] = 0
+            # No credit history at all
+            features['oldest_credit_age_months'] = np.nan  # No credits = undefined age
+            features['newest_credit_age_months'] = np.nan
+            features['avg_credit_age_months'] = np.nan
+            features['credit_history_length_months'] = 0     # 0 months of history is valid
+            features['days_since_last_default'] = np.nan    # Never defaulted = undefined
+            features['days_since_last_credit'] = np.nan     # No credits = undefined
+            features['avg_time_to_default_days'] = np.nan   # Never defaulted = undefined
+            features['avg_recovery_time_days'] = np.nan     # Never recovered = undefined
             return features
         
-        # Credit ages
+        # Credit ages - valid when credits exist
         ages = (ref_date - credit_data['opening_date']).dt.days / 30.44
-        features['oldest_credit_age_months'] = ages.max() if len(ages) > 0 else 0
-        features['newest_credit_age_months'] = ages.min() if len(ages) > 0 else 0
-        features['avg_credit_age_months'] = ages.mean() if len(ages) > 0 else 0
+        features['oldest_credit_age_months'] = ages.max() if len(ages) > 0 else np.nan
+        features['newest_credit_age_months'] = ages.min() if len(ages) > 0 else np.nan
+        features['avg_credit_age_months'] = ages.mean() if len(ages) > 0 else np.nan
         features['credit_history_length_months'] = features['oldest_credit_age_months']
         
-        # Days since last credit
+        # Days since last credit - valid when credits exist
         if len(credit_data) > 0:
             days_since = (ref_date - credit_data['opening_date'].max()).days
             features['days_since_last_credit'] = max(days_since, 0)
         else:
-            features['days_since_last_credit'] = 0
+            features['days_since_last_credit'] = np.nan
         
-        # Days since last default
+        # Days since last default - NaN if never defaulted (0 means "defaulted today")
         defaulted = credit_data[credit_data['default_date'].notna()]
         if len(defaulted) > 0:
             days_since_default = (ref_date - defaulted['default_date'].max()).days
             features['days_since_last_default'] = max(days_since_default, 0)
         else:
-            features['days_since_last_default'] = 0
+            # Customer has never defaulted - this is semantically different from 0!
+            features['days_since_last_default'] = np.nan
         
-        # Average time to default
+        # Average time to default - NaN if no defaults
         if len(defaulted) > 0:
             time_to_default = (defaulted['default_date'] - defaulted['opening_date']).dt.days
             features['avg_time_to_default_days'] = time_to_default.mean()
         else:
-            features['avg_time_to_default_days'] = 0
+            features['avg_time_to_default_days'] = np.nan
         
-        # Average recovery time
+        # Average recovery time - NaN if no recoveries
         recovered = credit_data[credit_data['recovery_date'].notna()]
         if len(recovered) > 0:
             recovery_time = (recovered['recovery_date'] - recovered['default_date']).dt.days
             features['avg_recovery_time_days'] = recovery_time.mean()
         else:
-            features['avg_recovery_time_days'] = 0
+            features['avg_recovery_time_days'] = np.nan
         
         return features
     

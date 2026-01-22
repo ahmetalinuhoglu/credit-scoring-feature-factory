@@ -46,7 +46,7 @@ def generate_data_dictionary():
     
     # Generate features
     print("\n[Step 1] Generating features...")
-    features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True)
+    features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True, fill_missing=False)
     print(f"Generated {features_df.shape[1]} features for {features_df.shape[0]} applications")
     
     # Get feature names (excluding ID columns)
@@ -661,6 +661,12 @@ def generate_data_dictionary():
         
         # Mean/avg features - can be NaN if no values
         if 'avg_' in name or 'average' in name or '_mean' in name:
+            return True
+        
+        # Coefficient of variation, regularity - require multiple values
+        if 'coefficient_of_variation' in name or '_cv' in name:
+            return True
+        if 'regularity' in name:
             return True
         
         return False
