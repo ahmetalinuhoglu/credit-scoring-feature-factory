@@ -46,7 +46,7 @@ def generate_data_dictionary():
     
     # Generate features
     print("\n[Step 1] Generating features...")
-    features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True, fill_missing=False)
+    features_df = factory.generate_all_features(apps_df, bureau_df, parallel=True)
     print(f"Generated {features_df.shape[1]} features for {features_df.shape[0]} applications")
     
     # Get feature names (excluding ID columns)

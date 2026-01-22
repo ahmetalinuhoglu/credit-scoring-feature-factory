@@ -220,11 +220,17 @@ class FeatureFactory:
         credit_bureau_df: pd.DataFrame,
         reference_date_col: str = 'application_date',
         parallel: bool = False,
-        n_jobs: int = 4,
-        fill_missing: bool = True
+        n_jobs: int = 4
     ) -> pd.DataFrame:
         """
         Generate all features from applications and credit bureau data.
+        
+        NaN values are preserved to maintain semantic meaning:
+        - days_since_last_default=NaN means "never defaulted"
+        - ratio features=NaN when denominator is 0
+        - avg/std features=NaN when no values exist
+        
+        Downstream consumers (models, imputers) should handle NaN appropriately.
         
         Args:
             applications_df: Applications DataFrame with application_id, customer_id, application_date
@@ -232,9 +238,6 @@ class FeatureFactory:
             reference_date_col: Column to use as reference date for time calculations
             parallel: If True, use multiprocessing for feature generation (local dev only)
             n_jobs: Number of parallel workers (only used if parallel=True)
-            fill_missing: If True (default), fill NaN values with 0 for model compatibility.
-                         If False, preserve NaN values to maintain semantic meaning
-                         (e.g., days_since_last_default=NaN means "never defaulted")
             
         Returns:
             DataFrame with one row per (application_id, customer_id) and all generated features
@@ -249,18 +252,13 @@ class FeatureFactory:
                 bureau_copy[col] = pd.to_datetime(bureau_copy[col], errors='coerce')
         
         if parallel:
-            result_df = self._generate_features_parallel(
+            return self._generate_features_parallel(
                 applications_df, bureau_copy, reference_date_col, n_jobs
             )
         else:
-            result_df = self._generate_features_vectorized(
+            return self._generate_features_vectorized(
                 applications_df, bureau_copy, reference_date_col
             )
-        
-        # Optionally fill missing values (default for model compatibility)
-        if fill_missing:
-            return result_df.fillna(0)
-        return result_df
     
     def _generate_features_vectorized(
         self,
