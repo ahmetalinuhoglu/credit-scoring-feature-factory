@@ -300,7 +300,7 @@ def generate_features_simple(
     start_time = time.time()
     result_pdf = factory.generate_all_features(
         applications_df=apps_pdf,
-        bureau_df=bureau_pdf,
+        credit_bureau_df=bureau_pdf,
         parallel=True
     )
     process_time = time.time() - start_time
