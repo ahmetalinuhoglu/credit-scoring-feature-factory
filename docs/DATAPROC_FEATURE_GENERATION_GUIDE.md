@@ -153,37 +153,131 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 ## Data Preparation
 
-### BigQuery Table Schemas
+### Input Data Options
 
-#### Applications Table
+The feature factory supports **two data input modes**:
+
+| Mode | Description | When to Use |
+|------|-------------|-------------|
+| **Separate Tables** | Two tables: `applications` and `bureau` | Standard setup, data stored separately |
+| **Pre-Joined Table** | Single table with all data joined | Data already joined in BigQuery, or using a view |
+
+### Option 1: Separate Tables (Default)
+
+#### Applications Table Schema
 
 ```sql
 CREATE TABLE `your-project.credit_scoring.applications` (
-    customer_id STRING NOT NULL,
-    application_id STRING NOT NULL,
-    application_date DATE NOT NULL,
-    -- Add other application fields as needed
+    customer_id STRING NOT NULL,           -- Unique customer identifier
+    application_id STRING NOT NULL,        -- Unique application identifier
+    application_date DATE NOT NULL,        -- Date of credit application
+    applicant_type STRING,                 -- 'PRIMARY' or 'CO_APPLICANT'
+    target INT64,                          -- Target variable (1=default, 0=no default)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-#### Bureau Table
+#### Bureau/Credit Table Schema
 
 ```sql
 CREATE TABLE `your-project.credit_scoring.bureau` (
-    customer_id STRING NOT NULL,
-    credit_id STRING,
-    product_type STRING,          -- 'consumer', 'mortgage', 'credit_card', etc.
-    opening_date DATE,
-    maturity_date DATE,
-    total_amount FLOAT64,
-    remaining_amount FLOAT64,
-    monthly_payment FLOAT64,
-    default_date DATE,            -- NULL if not defaulted
-    recovery_date DATE,           -- NULL if not recovered
-    closing_date DATE,            -- NULL if still active
+    customer_id STRING NOT NULL,           -- Links to applications.customer_id
+    application_id STRING,                 -- Links to applications.application_id
+    product_type STRING NOT NULL,          -- Credit type (see Product Types below)
+    opening_date DATE NOT NULL,            -- Credit opening date
+    total_amount FLOAT64,                  -- Original credit amount
+    monthly_payment FLOAT64,               -- Monthly payment amount
+    remaining_term_months INT64,           -- Remaining term in months
+    default_date DATE,                     -- NULL if not defaulted
+    recovery_date DATE,                    -- NULL if not recovered
+    closure_date DATE,                     -- NULL if still active
+    duration_months INT64,                 -- Original term in months
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+```
+
+#### Expected Product Types
+
+The `product_type` column should contain one of these values:
+
+| Code | Description |
+|------|-------------|
+| `IL` or `INSTALLMENT_LOAN` | Installment Loan (Bireysel Kredi) |
+| `IS` or `INSTALLMENT_SALE` | Installment Sale (Taksitli Satış) |
+| `CF` or `CASH_FACILITY` | Cash Facility / Credit Card (Nakit Avans) |
+| `MG` or `MORTGAGE` | Mortgage (Konut Kredisi) |
+
+### Option 2: Pre-Joined Table (Recommended for Existing Data)
+
+If your data is already joined in BigQuery, use `--joined-table`:
+
+```sql
+-- Example: Create a view that joins your existing tables
+CREATE VIEW `your-project.credit_scoring.credit_data_joined` AS
+SELECT 
+    a.customer_id,
+    a.application_id,
+    a.application_date,
+    a.applicant_type,
+    a.target,
+    b.product_type,
+    b.opening_date,
+    b.total_amount,
+    b.monthly_payment,
+    b.remaining_term_months,
+    b.default_date,
+    b.recovery_date,
+    b.closure_date,
+    b.duration_months
+FROM `your-project.credit_scoring.applications` a
+LEFT JOIN `your-project.credit_scoring.bureau` b
+    ON a.customer_id = b.customer_id 
+    AND a.application_id = b.application_id;
+```
+
+### Column Mapping (For Custom Field Names)
+
+If your columns have different names (e.g., Turkish names), use `--column-mapping`:
+
+#### Expected Column Names
+
+| Category | Expected Name | Description |
+|----------|---------------|-------------|
+| **Application** | `customer_id` | Unique customer ID |
+| **Application** | `application_id` | Unique application ID |
+| **Application** | `application_date` | Application date |
+| **Application** | `applicant_type` | PRIMARY or CO_APPLICANT |
+| **Application** | `target` | Target variable (0/1) |
+| **Bureau** | `product_type` | Credit type code |
+| **Bureau** | `opening_date` | Credit opening date |
+| **Bureau** | `total_amount` | Original credit amount |
+| **Bureau** | `monthly_payment` | Monthly payment |
+| **Bureau** | `remaining_term_months` | Remaining term |
+| **Bureau** | `default_date` | Default date (NULL if none) |
+| **Bureau** | `recovery_date` | Recovery date (NULL if none) |
+| **Bureau** | `closure_date` | Closure date (NULL if active) |
+| **Bureau** | `duration_months` | Original term |
+
+#### Column Mapping Example
+
+```bash
+# Turkish column names -> Expected names
+--column-mapping='{
+    "musteri_no": "customer_id",
+    "basvuru_no": "application_id",
+    "basvuru_tarihi": "application_date",
+    "basvuru_tipi": "applicant_type",
+    "hedef": "target",
+    "urun_kodu": "product_type",
+    "acilis_tarihi": "opening_date",
+    "kredi_tutari": "total_amount",
+    "aylik_taksit": "monthly_payment",
+    "kalan_vade": "remaining_term_months",
+    "temerrut_tarihi": "default_date",
+    "tahsilat_tarihi": "recovery_date",
+    "kapanis_tarihi": "closure_date",
+    "vade_ay": "duration_months"
+}'
 ```
 
 ### Load Sample Data to BigQuery
@@ -207,6 +301,7 @@ bq query --use_legacy_sql=false \
 ```
 
 ---
+
 
 ## Deploying Code to GCS
 
@@ -298,7 +393,25 @@ gcloud dataproc clusters create $CLUSTER_NAME \
 
 ## Running the Feature Generation Job
 
-### Basic Job Submission
+### Command Line Arguments Reference
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--project-id` | ✅ | - | GCP Project ID |
+| `--bq-dataset` | ✅ | - | BigQuery dataset name |
+| `--gcs-bucket` | ✅ | - | GCS bucket name (without gs://) |
+| `--output-path` | ❌ | `features/output` | Output path in GCS bucket |
+| `--applications-table` | ❌ | `applications` | Applications table name |
+| `--bureau-table` | ❌ | `bureau` | Bureau table name |
+| `--joined-table` | ❌ | - | **Pre-joined table name** (use instead of separate tables) |
+| `--column-mapping` | ❌ | - | **JSON column name mapping** |
+| `--config-path` | ❌ | - | Path to feature_config.yaml |
+| `--date-filter` | ❌ | - | SQL WHERE clause for filtering |
+| `--mode` | ❌ | `simple` | `simple` (recommended) or `distributed` |
+| `--num-partitions` | ❌ | `200` | Partitions for distributed mode |
+| `--save-format` | ❌ | `parquet` | Output format: parquet, csv, json |
+
+### Example 1: Separate Tables (Default)
 
 ```bash
 gcloud dataproc jobs submit pyspark \
@@ -311,32 +424,14 @@ gcloud dataproc jobs submit pyspark \
     --project-id=$PROJECT_ID \
     --bq-dataset=$DATASET_NAME \
     --gcs-bucket=$BUCKET_NAME \
+    --applications-table=applications \
+    --bureau-table=bureau \
     --output-path=features/$(date +%Y%m%d_%H%M%S) \
     --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
-    --mode=distributed \
-    --num-partitions=200
+    --mode=simple
 ```
 
-### With Date Filter
-
-```bash
-gcloud dataproc jobs submit pyspark \
-    gs://$BUCKET_NAME/code/dataproc_feature_job.py \
-    --cluster=$CLUSTER_NAME \
-    --region=$REGION \
-    --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
-    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2" \
-    -- \
-    --project-id=$PROJECT_ID \
-    --bq-dataset=$DATASET_NAME \
-    --gcs-bucket=$BUCKET_NAME \
-    --output-path=features/2024/january \
-    --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
-    --date-filter="application_date >= '2024-01-01' AND application_date < '2024-02-01'" \
-    --mode=distributed
-```
-
-### Simple Mode (For Smaller Datasets)
+### Example 2: Pre-Joined Table (Recommended)
 
 ```bash
 gcloud dataproc jobs submit pyspark \
@@ -349,9 +444,88 @@ gcloud dataproc jobs submit pyspark \
     --project-id=$PROJECT_ID \
     --bq-dataset=$DATASET_NAME \
     --gcs-bucket=$BUCKET_NAME \
-    --output-path=features/simple_output \
+    --joined-table=credit_data_joined \
+    --output-path=features/$(date +%Y%m%d_%H%M%S) \
     --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
     --mode=simple
+```
+
+### Example 3: Pre-Joined Table with Column Mapping (Turkish Names)
+
+```bash
+# Create the column mapping JSON
+COLUMN_MAPPING='{
+    "musteri_no": "customer_id",
+    "basvuru_no": "application_id",
+    "basvuru_tarihi": "application_date",
+    "basvuru_tipi": "applicant_type",
+    "hedef": "target",
+    "urun_kodu": "product_type",
+    "acilis_tarihi": "opening_date",
+    "kredi_tutari": "total_amount",
+    "aylik_taksit": "monthly_payment",
+    "kalan_vade": "remaining_term_months",
+    "temerrut_tarihi": "default_date",
+    "tahsilat_tarihi": "recovery_date",
+    "kapanis_tarihi": "closure_date",
+    "vade_ay": "duration_months"
+}'
+
+gcloud dataproc jobs submit pyspark \
+    gs://$BUCKET_NAME/code/dataproc_feature_job.py \
+    --cluster=$CLUSTER_NAME \
+    --region=$REGION \
+    --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
+    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2,spark.driver.memory=16g" \
+    -- \
+    --project-id=$PROJECT_ID \
+    --bq-dataset=$DATASET_NAME \
+    --gcs-bucket=$BUCKET_NAME \
+    --joined-table=kredi_verisi \
+    --column-mapping="$COLUMN_MAPPING" \
+    --output-path=features/$(date +%Y%m%d_%H%M%S) \
+    --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
+    --mode=simple
+```
+
+### Example 4: With Date Filter
+
+```bash
+gcloud dataproc jobs submit pyspark \
+    gs://$BUCKET_NAME/code/dataproc_feature_job.py \
+    --cluster=$CLUSTER_NAME \
+    --region=$REGION \
+    --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
+    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2" \
+    -- \
+    --project-id=$PROJECT_ID \
+    --bq-dataset=$DATASET_NAME \
+    --gcs-bucket=$BUCKET_NAME \
+    --joined-table=credit_data_joined \
+    --output-path=features/2024/january \
+    --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
+    --date-filter="application_date >= '2024-01-01' AND application_date < '2024-02-01'" \
+    --mode=simple
+```
+
+### Example 5: Distributed Mode (For Large Datasets)
+
+```bash
+gcloud dataproc jobs submit pyspark \
+    gs://$BUCKET_NAME/code/dataproc_feature_job.py \
+    --cluster=$CLUSTER_NAME \
+    --region=$REGION \
+    --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
+    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2" \
+    -- \
+    --project-id=$PROJECT_ID \
+    --bq-dataset=$DATASET_NAME \
+    --gcs-bucket=$BUCKET_NAME \
+    --joined-table=credit_data_joined \
+    --output-path=features/$(date +%Y%m%d_%H%M%S) \
+    --config-path=gs://$BUCKET_NAME/configs/feature_config.yaml \
+    --mode=distributed \
+    --num-partitions=200
 ```
 
 ---
@@ -633,7 +807,6 @@ def validate_output(result_df: DataFrame, min_rows: int = 100) -> bool:
     
     return True
 ```
-
 ---
 
 ## Quick Reference Commands
@@ -644,28 +817,96 @@ export PROJECT_ID="your-project"
 export REGION="europe-west1"
 export BUCKET_NAME="your-bucket"
 export CLUSTER_NAME="feature-factory"
+export DATASET_NAME="credit_scoring"
 
 # === Deploy Code ===
 cd src && zip -r ../feature_factory.zip features/ && cd ..
 gsutil cp feature_factory.zip gs://$BUCKET_NAME/code/
-gsutil cp configs/feature_config.yaml gs://$BUCKET_NAME/configs/
+gsutil cp config/feature_config.yaml gs://$BUCKET_NAME/configs/
 gsutil cp scripts/dataproc_feature_job.py gs://$BUCKET_NAME/code/
 
 # === Create Cluster ===
 gcloud dataproc clusters create $CLUSTER_NAME \
-    --region=$REGION --num-workers=4 --worker-machine-type=n1-standard-8
+    --region=$REGION \
+    --image-version=2.1-debian11 \
+    --num-workers=4 \
+    --worker-machine-type=n1-standard-8 \
+    --initialization-actions=gs://$BUCKET_NAME/init/init_script.sh \
+    --properties="spark:spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2"
 
-# === Run Job ===
+# === Run Job (Pre-Joined Table) ===
 gcloud dataproc jobs submit pyspark gs://$BUCKET_NAME/code/dataproc_feature_job.py \
     --cluster=$CLUSTER_NAME --region=$REGION \
     --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
-    -- --project-id=$PROJECT_ID --bq-dataset=credit_scoring --gcs-bucket=$BUCKET_NAME
+    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2,spark.driver.memory=16g" \
+    -- \
+    --project-id=$PROJECT_ID \
+    --bq-dataset=$DATASET_NAME \
+    --gcs-bucket=$BUCKET_NAME \
+    --joined-table=credit_data_joined \
+    --output-path=features/$(date +%Y%m%d_%H%M%S) \
+    --mode=simple
+
+# === Run Job with Column Mapping ===
+COLUMN_MAPPING='{"musteri_no":"customer_id","basvuru_no":"application_id","basvuru_tarihi":"application_date","urun_kodu":"product_type","acilis_tarihi":"opening_date","kredi_tutari":"total_amount","temerrut_tarihi":"default_date"}'
+
+gcloud dataproc jobs submit pyspark gs://$BUCKET_NAME/code/dataproc_feature_job.py \
+    --cluster=$CLUSTER_NAME --region=$REGION \
+    --py-files=gs://$BUCKET_NAME/code/feature_factory.zip \
+    --properties="spark.jars.packages=com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.32.2,spark.driver.memory=16g" \
+    -- \
+    --project-id=$PROJECT_ID \
+    --bq-dataset=$DATASET_NAME \
+    --gcs-bucket=$BUCKET_NAME \
+    --joined-table=kredi_verisi \
+    --column-mapping="$COLUMN_MAPPING" \
+    --output-path=features/$(date +%Y%m%d_%H%M%S) \
+    --mode=simple
 
 # === Check Output ===
 gsutil ls gs://$BUCKET_NAME/features/
+gsutil du -h gs://$BUCKET_NAME/features/
 
 # === Delete Cluster ===
-gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION
+gcloud dataproc clusters delete $CLUSTER_NAME --region=$REGION --quiet
+```
+
+---
+
+## Troubleshooting
+
+### Common Errors and Solutions
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Column not found: customer_id` | Column names don't match expected | Use `--column-mapping` to map your columns |
+| `BigQuery connector not found` | Missing Spark package | Add `--properties="spark.jars.packages=..."` |
+| `Out of memory on driver` | Dataset too large for simple mode | Increase `spark.driver.memory` or use distributed mode |
+| `py-files not found` | Missing zip file | Run `gsutil ls gs://$BUCKET/code/feature_factory.zip` |
+| `JSON parsing error` | Invalid column mapping JSON | Validate JSON with `echo $COLUMN_MAPPING | jq .` |
+
+### Checking Your Column Names
+
+Before running the job, verify your BigQuery table columns:
+
+```bash
+# List columns in your table
+bq show --schema --format=prettyjson $PROJECT_ID:$DATASET_NAME.your_table | jq '.[].name'
+```
+
+### Verifying Output
+
+```bash
+# Check if output was created
+gsutil ls gs://$BUCKET_NAME/features/
+
+# Check row count in output
+gsutil cat gs://$BUCKET_NAME/features/your_output/_SUCCESS && echo "Job succeeded!"
+
+# Preview output data (first 10 rows)
+bq load --source_format=PARQUET --autodetect temp_features gs://$BUCKET_NAME/features/your_output/*.parquet
+bq head --max_rows=10 temp_features
+bq rm -f temp_features
 ```
 
 ---
@@ -680,3 +921,10 @@ For issues specific to:
 For GCP-specific issues, consult:
 - [Dataproc Documentation](https://cloud.google.com/dataproc/docs)
 - [BigQuery Spark Connector](https://github.com/GoogleCloudDataproc/spark-bigquery-connector)
+
+### Getting Help
+
+1. **Check logs**: `gcloud dataproc jobs describe JOB_ID --region=$REGION`
+2. **SSH to master**: `gcloud compute ssh $CLUSTER_NAME-m --zone=$ZONE`
+3. **View Spark UI**: Use port forwarding with `gcloud compute ssh ... -- -L 4040:localhost:4040`
+
