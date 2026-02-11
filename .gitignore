@@ -111,11 +111,26 @@ data/processed/*
 data/sample/*
 !data/**/.gitkeep
 
-# Output files
+# Model development outputs (keep directory structure, ignore run contents)
+outputs/model_development/*/
+outputs/experiment_log.csv
+
+# Parquet files in outputs
+outputs/**/*.parquet
+
+# Other output files
 outputs/
 *.pkl
 *.joblib
-*.parquet
+
+# Logs
+logs/
+
+# Keep config tracked
+!config/
+
+# Keep sample data tracked
+!data/sample/
 
 # Spark
 spark-warehouse/

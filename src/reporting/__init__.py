@@ -7,7 +7,9 @@ Provides report generation for pipeline outputs including:
 """
 
 from src.reporting.report_exporter import ReportExporter
+from src.reporting.excel_reporter import ExcelReporter
 
 __all__ = [
     "ReportExporter",
+    "ExcelReporter",
 ]

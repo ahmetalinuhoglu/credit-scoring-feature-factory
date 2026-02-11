@@ -1,0 +1,90 @@
+# Model Development Pipeline Configuration
+data:
+  input_path: "data/sample/sample_features.parquet"
+  target_column: "target"
+  date_column: "date"
+  id_columns: ["application_id", "customer_id"]
+  exclude_columns: ["applicant_type"]
+
+splitting:
+  train_end_date: "2024-06-30"
+  test_size: 0.20
+  stratify: true
+
+steps:
+  constant:
+    enabled: true
+    min_unique_values: 2
+  missing:
+    enabled: true
+    threshold: 0.70
+  iv:
+    enabled: true
+    min_iv: 0.02
+    max_iv: 0.50
+    n_bins: 10
+    min_samples_per_bin: 50
+  psi:
+    enabled: true
+    threshold: 0.25
+    n_bins: 10
+    checks:
+      - type: "quarterly"
+      - type: "yearly"
+      - type: "consecutive"
+  correlation:
+    enabled: true
+    threshold: 0.90
+    method: "pearson"
+  selection:
+    enabled: true
+    method: "forward"
+    auc_threshold: 0.0001
+    max_features: null
+
+model:
+  algorithm: "xgboost"
+  params:
+    objective: "binary:logistic"
+    eval_metric: "auc"
+    max_depth: 6
+    learning_rate: 0.1
+    n_estimators: 300
+    early_stopping_rounds: 30
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 1
+    gamma: 0
+    reg_alpha: 0
+    reg_lambda: 1
+
+evaluation:
+  metrics: ["auc", "gini", "ks"]
+  precision_at_k: [5, 10, 20]
+  n_deciles: 10
+  calculate_score_psi: true
+
+validation:
+  enabled: true
+  checks:
+    min_auc: 0.65
+    max_overfit_gap: 0.05
+    max_oot_degradation: 0.08
+    max_score_psi: 0.25
+    max_feature_concentration: 0.50
+    min_oot_samples: 30
+    check_monotonicity: true
+
+output:
+  base_dir: "outputs/model_development"
+  save_step_results: true
+  save_model: true
+  save_split_indices: true
+  generate_excel: true
+  save_correlation_matrix: true
+
+reproducibility:
+  global_seed: 42
+  save_config: true
+  save_metadata: true
+  log_level: "DEBUG"

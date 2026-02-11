@@ -1,10 +1,6 @@
 # Agent Team Prompt: Credit Scoring Pipeline Overhaul
 
-> Copy everything below the line and paste into Claude Code to spawn the team.
-
----
-
-Create an agent team with 5 teammates to overhaul this credit scoring ML pipeline into a production-grade, modular, reproducible system. Each teammate owns a distinct domain with clear file boundaries. Use Sonnet for all teammates. Require plan approval before any teammate makes changes.
+Create an agent team with 5 teammates to overhaul this credit scoring ML pipeline into a production-grade, modular, reproducible system. Each teammate owns a distinct domain with clear file boundaries. Use Opus for all teammates. Do not require plan approval for any change or plan.
 
 ## Context: Current State
 
