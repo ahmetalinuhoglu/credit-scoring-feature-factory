@@ -49,6 +49,7 @@ def load_and_split(
     id_columns: Optional[List[str]] = None,
     meta_columns: Optional[List[str]] = None,
     test_size: float = 0.20,
+    stratify: bool = True,
     random_state: int = 42,
 ) -> DataSets:
     """
@@ -73,9 +74,12 @@ def load_and_split(
     if meta_columns is None:
         meta_columns = ['applicant_type']
 
-    # Load parquet
+    # Load data (parquet or csv)
     logger.info(f"Loading data from {input_path}")
-    df = pd.read_parquet(input_path)
+    if input_path.endswith('.csv'):
+        df = pd.read_csv(input_path)
+    else:
+        df = pd.read_parquet(input_path)
     logger.info(f"Loaded {len(df):,} rows, {len(df.columns):,} columns")
 
     # Ensure date column is datetime
@@ -106,10 +110,16 @@ def load_and_split(
     feature_columns = [c for c in df.columns if c not in exclude_cols]
     logger.info(f"Feature columns: {len(feature_columns)}")
 
-    # Stratified train/test split within training period
-    train_df, test_df = _stratified_split(
-        train_period, target_column, test_size, random_state
-    )
+    # Train/test split within training period
+    if stratify:
+        train_df, test_df = _stratified_split(
+            train_period, target_column, test_size, random_state
+        )
+    else:
+        train_df, test_df = _temporal_split(
+            train_period, date_column, target_column, test_size
+        )
+        logger.info("Using temporal train/test split (stratify=False)")
 
     logger.info(
         f"Train: {len(train_df):,} rows "
@@ -142,6 +152,24 @@ def load_and_split(
         target_column=target_column,
         date_column=date_column,
     )
+
+
+def _temporal_split(
+    df: pd.DataFrame,
+    date_column: str,
+    target_column: str,
+    test_size: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Temporal train/test split: earlier dates for train, later for test.
+
+    Sorts by date and splits so that the last `test_size` fraction of data
+    becomes the test set. This preserves temporal ordering.
+    """
+    df_sorted = df.sort_values(date_column).reset_index(drop=True)
+    split_idx = int(len(df_sorted) * (1 - test_size))
+    train_df = df_sorted.iloc[:split_idx].reset_index(drop=True)
+    test_df = df_sorted.iloc[split_idx:].reset_index(drop=True)
+    return train_df, test_df
 
 
 def _stratified_split(

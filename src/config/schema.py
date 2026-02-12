@@ -102,19 +102,32 @@ class CorrelationConfig(BaseModel):
     model_config = {"frozen": True}
 
     enabled: bool = True
-    threshold: float = Field(default=0.90, ge=0.0, le=1.0)
+    threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     method: Literal["pearson", "spearman", "kendall"] = "pearson"
 
 
 class SelectionConfig(BaseModel):
-    """Forward feature selection configuration."""
+    """Sequential feature selection configuration."""
 
     model_config = {"frozen": True}
 
     enabled: bool = True
-    method: Literal["forward"] = "forward"
-    auc_threshold: float = Field(default=0.0001, ge=0.0)
-    max_features: Optional[int] = None
+    method: Literal["forward", "backward"] = "forward"
+    cv: int = Field(default=5, ge=2)
+    max_features: int = Field(default=20, ge=1)
+    min_features: int = Field(default=1, ge=1)
+    tolerance: float = Field(default=0.001, ge=0.0)
+    patience: int = Field(default=3, ge=1)
+
+
+class VIFConfig(BaseModel):
+    """Variance Inflation Factor elimination configuration."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    threshold: float = Field(default=5.0, ge=1.0)
+    iv_aware: bool = True
 
 
 class StepsConfig(BaseModel):
@@ -128,6 +141,20 @@ class StepsConfig(BaseModel):
     psi: PSIConfig = Field(default_factory=PSIConfig)
     correlation: CorrelationConfig = Field(default_factory=CorrelationConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
+    vif: VIFConfig = Field(default_factory=VIFConfig)
+
+
+class TuningConfig(BaseModel):
+    """Hyperparameter tuning configuration."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    method: Literal["optuna"] = "optuna"
+    n_trials: int = Field(default=100, ge=1)
+    timeout: Optional[int] = None
+    cv: int = Field(default=5, ge=2)
+    stability_weight: float = Field(default=1.0, ge=0.0)
 
 
 class ModelConfig(BaseModel):
@@ -152,6 +179,29 @@ class ModelConfig(BaseModel):
             "reg_lambda": 1,
         }
     )
+    tuning: TuningConfig = Field(default_factory=TuningConfig)
+
+
+class CalibrationConfig(BaseModel):
+    """Calibration configuration."""
+    model_config = {"frozen": True}
+    enabled: bool = True
+    method: Literal["platt", "isotonic", "temperature"] = "platt"
+
+
+class SHAPConfig(BaseModel):
+    """SHAP interpretability configuration."""
+    model_config = {"frozen": True}
+    enabled: bool = True
+    max_samples: int = Field(default=500, ge=10)
+
+
+class BootstrapConfig(BaseModel):
+    """Bootstrap confidence interval configuration."""
+    model_config = {"frozen": True}
+    enabled: bool = True
+    n_iterations: int = Field(default=1000, ge=100)
+    confidence_level: float = Field(default=0.95, ge=0.50, le=0.99)
 
 
 class EvaluationConfig(BaseModel):
@@ -163,6 +213,10 @@ class EvaluationConfig(BaseModel):
     precision_at_k: List[int] = Field(default_factory=lambda: [5, 10, 20])
     n_deciles: int = Field(default=10, ge=2)
     calculate_score_psi: bool = True
+    importance_type: Literal["gain", "weight", "cover", "total_gain", "total_cover"] = "gain"
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    shap: SHAPConfig = Field(default_factory=SHAPConfig)
+    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
 
 class ValidationChecksConfig(BaseModel):
@@ -207,6 +261,7 @@ class ReproducibilityConfig(BaseModel):
     model_config = {"frozen": True}
 
     global_seed: int = 42
+    n_jobs: int = Field(default=-1, ge=-1)
     save_config: bool = True
     save_metadata: bool = True
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"

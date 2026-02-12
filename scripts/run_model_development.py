@@ -12,6 +12,12 @@ Usage:
         --input data/features.parquet \
         --train-end-date 2024-06-30
 
+    # Use backward selection with tuning disabled:
+    python scripts/run_model_development.py \
+        --config config/model_development.yaml \
+        --selection-method backward \
+        --no-tuning
+
     # Legacy mode (no YAML, all CLI args):
     python scripts/run_model_development.py \
         --input data/features.parquet \
@@ -96,9 +102,64 @@ def parse_args():
         '--correlation-threshold', type=float, default=None,
         help='Maximum absolute correlation between features',
     )
+
+    # Selection overrides
     parser.add_argument(
-        '--auc-threshold', type=float, default=None,
-        help='Minimum AUC improvement for feature selection',
+        '--selection-method', choices=['forward', 'backward'], default=None,
+        help='Feature selection direction',
+    )
+    parser.add_argument(
+        '--selection-cv', type=int, default=None,
+        help='Number of CV folds for feature selection',
+    )
+    parser.add_argument(
+        '--selection-max-features', type=int, default=None,
+        help='Maximum number of features to select',
+    )
+    parser.add_argument(
+        '--selection-min-features', type=int, default=None,
+        help='Minimum number of features to select',
+    )
+    parser.add_argument(
+        '--selection-tolerance', type=float, default=None,
+        help='Minimum AUC improvement to avoid early stopping',
+    )
+    parser.add_argument(
+        '--selection-patience', type=int, default=None,
+        help='Consecutive non-improving steps before early stopping',
+    )
+
+    # VIF overrides
+    parser.add_argument(
+        '--vif-threshold', type=float, default=None,
+        help='VIF threshold for multicollinearity elimination',
+    )
+    parser.add_argument(
+        '--no-vif', action='store_true', default=False,
+        help='Disable VIF multicollinearity check',
+    )
+
+    # Tuning overrides
+    parser.add_argument(
+        '--tuning-trials', type=int, default=None,
+        help='Number of Optuna tuning trials',
+    )
+    parser.add_argument(
+        '--tuning-timeout', type=int, default=None,
+        help='Maximum time in seconds for hyperparameter tuning',
+    )
+    parser.add_argument(
+        '--tuning-cv', type=int, default=None,
+        help='Number of CV folds for hyperparameter tuning',
+    )
+    parser.add_argument(
+        '--no-tuning', action='store_true', default=False,
+        help='Disable hyperparameter tuning (use default params)',
+    )
+    parser.add_argument(
+        '--stability-weight', type=float, default=None,
+        help='Penalty multiplier for AUC deviation across periods during tuning '
+             '(0 = pure mean AUC, 1 = equal weight on stability)',
     )
 
     # Data settings overrides
@@ -113,6 +174,38 @@ def parse_args():
     parser.add_argument(
         '--date-column', default=None,
         help='Name of the application date column',
+    )
+
+    # Evaluation enhancement overrides
+    parser.add_argument(
+        '--no-calibration', action='store_true', default=False,
+        help='Disable probability calibration',
+    )
+    parser.add_argument(
+        '--no-shap', action='store_true', default=False,
+        help='Disable SHAP analysis',
+    )
+    parser.add_argument(
+        '--no-bootstrap', action='store_true', default=False,
+        help='Disable bootstrap AUC confidence intervals',
+    )
+    parser.add_argument(
+        '--calibration-method', choices=['platt', 'isotonic', 'temperature'],
+        default=None, help='Calibration method',
+    )
+    parser.add_argument(
+        '--importance-type', choices=['gain', 'weight', 'cover', 'total_gain', 'total_cover'],
+        default=None, help='Feature importance type for XGBoost',
+    )
+    parser.add_argument(
+        '--temporal-split', action='store_true', default=False,
+        help='Use temporal (date-based) train/test split instead of stratified random',
+    )
+
+    # Parallelism
+    parser.add_argument(
+        '--n-jobs', type=int, default=None,
+        help='Number of parallel jobs (-1 = all cores, 1 = sequential)',
     )
 
     return parser.parse_args()
@@ -144,8 +237,56 @@ def _build_cli_overrides(args) -> dict:
         overrides["steps.psi.threshold"] = args.psi_threshold
     if args.correlation_threshold is not None:
         overrides["steps.correlation.threshold"] = args.correlation_threshold
-    if args.auc_threshold is not None:
-        overrides["steps.selection.auc_threshold"] = args.auc_threshold
+
+    # Selection overrides
+    if args.selection_method is not None:
+        overrides["steps.selection.method"] = args.selection_method
+    if args.selection_cv is not None:
+        overrides["steps.selection.cv"] = args.selection_cv
+    if args.selection_max_features is not None:
+        overrides["steps.selection.max_features"] = args.selection_max_features
+    if args.selection_min_features is not None:
+        overrides["steps.selection.min_features"] = args.selection_min_features
+    if args.selection_tolerance is not None:
+        overrides["steps.selection.tolerance"] = args.selection_tolerance
+    if args.selection_patience is not None:
+        overrides["steps.selection.patience"] = args.selection_patience
+
+    # VIF overrides
+    if args.no_vif:
+        overrides["steps.vif.enabled"] = False
+    if args.vif_threshold is not None:
+        overrides["steps.vif.threshold"] = args.vif_threshold
+
+    # Tuning overrides
+    if args.no_tuning:
+        overrides["model.tuning.enabled"] = False
+    if args.tuning_trials is not None:
+        overrides["model.tuning.n_trials"] = args.tuning_trials
+    if args.tuning_timeout is not None:
+        overrides["model.tuning.timeout"] = args.tuning_timeout
+    if args.tuning_cv is not None:
+        overrides["model.tuning.cv"] = args.tuning_cv
+    if args.stability_weight is not None:
+        overrides["model.tuning.stability_weight"] = args.stability_weight
+
+    # Evaluation enhancement overrides
+    if args.no_calibration:
+        overrides["evaluation.calibration.enabled"] = False
+    if args.no_shap:
+        overrides["evaluation.shap.enabled"] = False
+    if args.no_bootstrap:
+        overrides["evaluation.bootstrap.enabled"] = False
+    if args.calibration_method is not None:
+        overrides["evaluation.calibration.method"] = args.calibration_method
+    if args.importance_type is not None:
+        overrides["evaluation.importance_type"] = args.importance_type
+    if args.temporal_split:
+        overrides["splitting.stratify"] = False
+
+    # Parallelism
+    if args.n_jobs is not None:
+        overrides["reproducibility.n_jobs"] = args.n_jobs
 
     return overrides
 
@@ -206,7 +347,7 @@ def main():
     # Build PSI checks
     psi_checks = _build_psi_checks(config, args)
 
-    # Run the existing pipeline with config-derived parameters
+    # Run the pipeline with config-derived parameters
     pipeline = ModelDevelopmentPipeline(
         input_path=config.data.input_path,
         train_end_date=config.splitting.train_end_date,
@@ -216,12 +357,30 @@ def main():
         missing_threshold=config.steps.missing.threshold,
         psi_threshold=config.steps.psi.threshold,
         correlation_threshold=config.steps.correlation.threshold,
-        auc_threshold=config.steps.selection.auc_threshold,
         test_size=config.splitting.test_size,
         target_column=config.data.target_column,
         date_column=config.data.date_column,
         xgb_params=config.model.params,
         psi_checks=psi_checks,
+        # Selection params
+        selection_method=config.steps.selection.method,
+        selection_cv=config.steps.selection.cv,
+        selection_max_features=config.steps.selection.max_features,
+        selection_min_features=config.steps.selection.min_features,
+        selection_tolerance=config.steps.selection.tolerance,
+        selection_patience=config.steps.selection.patience,
+        # VIF params
+        vif_enabled=config.steps.vif.enabled,
+        vif_threshold=config.steps.vif.threshold,
+        vif_iv_aware=config.steps.vif.iv_aware,
+        # Tuning params
+        tuning_enabled=config.model.tuning.enabled,
+        tuning_n_trials=config.model.tuning.n_trials,
+        tuning_timeout=config.model.tuning.timeout,
+        tuning_cv=config.model.tuning.cv,
+        # Config and output manager for enhanced steps
+        config=config,
+        output_manager=output_manager,
     )
 
     results = pipeline.run()
@@ -234,7 +393,19 @@ def main():
     print(f"\n{'='*60}")
     print(f"Pipeline completed: {results['status']}")
     print(f"Selected features: {results['after_selection']}")
+    if results.get('after_vif') != results.get('after_selection'):
+        print(f"After VIF check: {results['after_vif']}")
+    if results.get('tuning_best_params'):
+        print(f"Tuning: {results.get('tuning_n_trials', '?')} trials completed")
     print(f"Excel report: {results['excel_path']}")
+    if results.get('chart_path'):
+        print(f"Selection chart: {results['chart_path']}")
+    if results.get('model_path'):
+        print(f"Model artifact: {results['model_path']}")
+    if results.get('shap_plot_paths'):
+        print(f"SHAP plots: {', '.join(results['shap_plot_paths'])}")
+    if results.get('has_critical_failures'):
+        print("WARNING: Validation found critical failures!")
     print(f"Run directory: {output_manager.run_dir}")
     print(f"Log file: {results['log_file']}")
     print(f"{'='*60}")

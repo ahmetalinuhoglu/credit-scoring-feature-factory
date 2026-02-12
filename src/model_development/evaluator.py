@@ -10,6 +10,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed, effective_n_jobs
 from sklearn.metrics import roc_auc_score, roc_curve, precision_score
 import xgboost as xgb
 
@@ -24,6 +25,7 @@ def evaluate_model_quarterly(
     test_df: pd.DataFrame,
     oot_quarters: Dict[str, pd.DataFrame],
     target_column: str = 'target',
+    importance_type: str = 'gain',
 ) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
     """
     Evaluate model across train, test, and each OOT quarter.
@@ -90,7 +92,7 @@ def evaluate_model_quarterly(
     performance_df = pd.DataFrame(perf_rows)
 
     # Feature importance
-    importance_df = _feature_importance(model, selected_features)
+    importance_df = _feature_importance(model, selected_features, importance_type=importance_type)
 
     return performance_df, lift_tables, importance_df
 
@@ -179,11 +181,216 @@ def _precision_lift_at_k(
         return None, None
 
 
+def _bootstrap_auc_batch(
+    y: np.ndarray, y_prob: np.ndarray, n: int, seeds: List[int]
+) -> List[Optional[float]]:
+    """Compute a batch of bootstrap AUC samples (picklable, for joblib)."""
+    aucs = []
+    for seed in seeds:
+        rng = np.random.RandomState(seed)
+        idx = rng.randint(0, n, size=n)
+        y_boot = y[idx]
+        prob_boot = y_prob[idx]
+        if len(np.unique(y_boot)) < 2:
+            continue
+        aucs.append(roc_auc_score(y_boot, prob_boot))
+    return aucs
+
+
+def bootstrap_auc_ci(
+    model: xgb.XGBClassifier,
+    selected_features: List[str],
+    datasets: List[Tuple[str, pd.DataFrame]],
+    target_column: str = 'target',
+    n_iterations: int = 1000,
+    confidence_level: float = 0.95,
+    n_jobs: int = 1,
+) -> pd.DataFrame:
+    """
+    Compute bootstrap confidence intervals for AUC across periods.
+
+    Args:
+        model: Trained XGBoost model.
+        selected_features: List of features used in the model.
+        datasets: List of (period_name, DataFrame) tuples.
+        target_column: Name of the target column.
+        n_iterations: Number of bootstrap iterations.
+        confidence_level: Confidence level for the interval.
+
+    Returns:
+        DataFrame with columns: Period, AUC, CI_Lower, CI_Upper, N_Bootstrap.
+    """
+    rng = np.random.RandomState(42)
+    alpha = (1 - confidence_level) / 2
+    rows = []
+
+    for period_name, df in datasets:
+        if len(df) == 0:
+            continue
+
+        X = df[selected_features]
+        y = df[target_column].values
+
+        if len(np.unique(y)) < 2:
+            logger.warning(
+                f"Bootstrap | {period_name}: only one class present, skipping"
+            )
+            continue
+
+        y_prob = model.predict_proba(X)[:, 1]
+        point_auc = roc_auc_score(y, y_prob)
+
+        n = len(y)
+        if n < 10:
+            rows.append({
+                'Period': period_name,
+                'AUC': round(point_auc, 4),
+                'CI_Lower': None,
+                'CI_Upper': None,
+                'N_Bootstrap': 0,
+            })
+            continue
+
+        # Pre-generate all seeds deterministically from main RNG
+        all_seeds = rng.randint(0, 2**31, size=n_iterations).tolist()
+
+        # Split seeds into chunks for parallel execution
+        actual_n_jobs = effective_n_jobs(n_jobs)
+        chunk_size = max(1, n_iterations // actual_n_jobs)
+        seed_chunks = [
+            all_seeds[i:i + chunk_size]
+            for i in range(0, n_iterations, chunk_size)
+        ]
+
+        batch_results = Parallel(n_jobs=n_jobs)(
+            delayed(_bootstrap_auc_batch)(y, y_prob, n, chunk)
+            for chunk in seed_chunks
+        )
+        boot_aucs = []
+        for batch in batch_results:
+            boot_aucs.extend(batch)
+
+        if len(boot_aucs) == 0:
+            rows.append({
+                'Period': period_name,
+                'AUC': round(point_auc, 4),
+                'CI_Lower': None,
+                'CI_Upper': None,
+                'N_Bootstrap': 0,
+            })
+            continue
+
+        boot_aucs = np.array(boot_aucs)
+        ci_lower = float(np.percentile(boot_aucs, 100 * alpha))
+        ci_upper = float(np.percentile(boot_aucs, 100 * (1 - alpha)))
+
+        rows.append({
+            'Period': period_name,
+            'AUC': round(point_auc, 4),
+            'CI_Lower': round(ci_lower, 4),
+            'CI_Upper': round(ci_upper, 4),
+            'N_Bootstrap': len(boot_aucs),
+        })
+
+        logger.info(
+            f"Bootstrap | {period_name}: AUC={point_auc:.4f} "
+            f"[{ci_lower:.4f}, {ci_upper:.4f}] ({len(boot_aucs)} iterations)"
+        )
+
+    return pd.DataFrame(rows)
+
+
+def compute_score_psi(
+    train_scores: np.ndarray,
+    oot_scores_dict: Dict[str, np.ndarray],
+    n_bins: int = 10,
+) -> pd.DataFrame:
+    """
+    Compute PSI of predicted scores between train and each OOT period.
+
+    Args:
+        train_scores: Array of predicted probabilities for training set.
+        oot_scores_dict: Dict mapping period_name -> scores array.
+        n_bins: Number of bins for PSI calculation.
+
+    Returns:
+        DataFrame with columns: Period_1, Period_2, PSI, Status.
+    """
+    rows = []
+
+    for period_name, oot_scores in oot_scores_dict.items():
+        psi = _calculate_score_psi(train_scores, oot_scores, n_bins)
+        if psi is None:
+            status = 'N/A'
+        elif psi < 0.1:
+            status = 'Stable'
+        elif psi < 0.25:
+            status = 'Moderate'
+        else:
+            status = 'Significant'
+
+        rows.append({
+            'Period_1': 'Train',
+            'Period_2': period_name,
+            'PSI': round(psi, 4) if psi is not None else None,
+            'Status': status,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _calculate_score_psi(
+    expected: np.ndarray, actual: np.ndarray, n_bins: int = 10
+) -> Optional[float]:
+    """Calculate PSI between two score distributions."""
+    try:
+        if len(expected) < 10 or len(actual) < 10:
+            return None
+
+        try:
+            _, bins = pd.qcut(expected, q=n_bins, retbins=True, duplicates='drop')
+        except ValueError:
+            n = min(5, len(np.unique(expected)))
+            if n < 2:
+                return None
+            _, bins = pd.qcut(expected, q=n, retbins=True, duplicates='drop')
+
+        bins[0] = -np.inf
+        bins[-1] = np.inf
+
+        expected_bins = pd.cut(expected, bins=bins)
+        actual_bins = pd.cut(actual, bins=bins)
+
+        expected_pct = pd.Series(expected_bins).value_counts(normalize=True).sort_index()
+        actual_pct = pd.Series(actual_bins).value_counts(normalize=True).sort_index()
+
+        all_bins = expected_pct.index.union(actual_pct.index)
+        expected_pct = expected_pct.reindex(all_bins, fill_value=0.0001)
+        actual_pct = actual_pct.reindex(all_bins, fill_value=0.0001)
+
+        epsilon = 1e-4
+        expected_pct = expected_pct.clip(lower=epsilon)
+        actual_pct = actual_pct.clip(lower=epsilon)
+
+        psi = float(((actual_pct - expected_pct) * np.log(actual_pct / expected_pct)).sum())
+        return psi if np.isfinite(psi) else None
+    except Exception:
+        return None
+
+
 def _feature_importance(
-    model: xgb.XGBClassifier, features: List[str]
+    model: xgb.XGBClassifier, features: List[str],
+    importance_type: str = 'gain',
 ) -> pd.DataFrame:
     """Extract and sort feature importances."""
-    importances = model.feature_importances_
+    try:
+        booster_scores = model.get_booster().get_score(importance_type=importance_type)
+        importances = np.array([booster_scores.get(f, 0.0) for f in features])
+        total = importances.sum()
+        if total > 0:
+            importances = importances / total
+    except Exception:
+        importances = model.feature_importances_
     df = pd.DataFrame({
         'Feature': features,
         'Importance': importances,

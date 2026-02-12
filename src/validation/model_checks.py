@@ -386,18 +386,24 @@ class ModelValidator:
     # Monotonicity
     # ------------------------------------------------------------------
 
-    def _check_monotonicity(self, woe_bins: Dict[str, pd.DataFrame]) -> CheckResult:
+    def _check_monotonicity(self, woe_bins: Dict[str, Any]) -> CheckResult:
         """Check if WoE trend is monotonic for each selected feature."""
         non_monotonic: List[str] = []
-        for feature, bins_df in woe_bins.items():
-            woe_col = None
-            for candidate in ("WoE", "woe", "WOE"):
-                if candidate in bins_df.columns:
-                    woe_col = candidate
-                    break
-            if woe_col is None:
+        for feature, bins_data in woe_bins.items():
+            # Handle List[WoEBin] (from IVFilter) or DataFrame
+            if isinstance(bins_data, list):
+                woe_values = np.array([b.woe for b in bins_data if b.woe is not None])
+            elif isinstance(bins_data, pd.DataFrame):
+                woe_col = None
+                for candidate in ("WoE", "woe", "WOE"):
+                    if candidate in bins_data.columns:
+                        woe_col = candidate
+                        break
+                if woe_col is None:
+                    continue
+                woe_values = bins_data[woe_col].dropna().values
+            else:
                 continue
-            woe_values = bins_df[woe_col].dropna().values
             if len(woe_values) < 2:
                 continue
             diffs = np.diff(woe_values)
@@ -448,7 +454,7 @@ class ModelValidator:
             )
 
         bad_col = None
-        for candidate in ("N_Bad", "n_bad", "Bad", "bad", "bads"):
+        for candidate in ("N_Bads", "N_Bad", "n_bad", "Bad", "bad", "bads"):
             if candidate in oot_rows.columns:
                 bad_col = candidate
                 break

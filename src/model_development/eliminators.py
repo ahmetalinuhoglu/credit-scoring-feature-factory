@@ -16,6 +16,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from sklearn.metrics import roc_auc_score, roc_curve
 
 
@@ -157,6 +158,116 @@ class MissingEliminator(BaseEliminator):
         return EliminationResult(self.step_name, kept, eliminated, details_df)
 
 
+def _calculate_iv_static(
+    feat_values: np.ndarray, target_values: np.ndarray, n_bins: int
+) -> Optional[float]:
+    """Calculate IV for a single feature (module-level, picklable for joblib)."""
+    try:
+        data = pd.DataFrame({'feature': feat_values, 'target': target_values}).dropna()
+        if len(data) < 50:
+            return None
+
+        total_goods = (data['target'] == 0).sum()
+        total_bads = (data['target'] == 1).sum()
+        if total_goods == 0 or total_bads == 0:
+            return None
+
+        try:
+            data['bin'] = pd.qcut(
+                data['feature'], q=n_bins,
+                labels=False, duplicates='drop',
+            )
+        except (ValueError, TypeError):
+            return None
+
+        iv = 0.0
+        epsilon = 1e-6
+        for _, group in data.groupby('bin'):
+            goods = (group['target'] == 0).sum()
+            bads = (group['target'] == 1).sum()
+            pct_goods = max(goods / total_goods, epsilon)
+            pct_bads = max(bads / total_bads, epsilon)
+            woe = np.log(pct_goods / pct_bads)
+            iv += (pct_goods - pct_bads) * woe
+
+        return float(iv)
+    except Exception:
+        return None
+
+
+def _calculate_univariate_metrics_static(
+    feat_values: np.ndarray, target_values: np.ndarray
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Calculate univariate AUC, Gini, KS for a single feature (module-level, picklable)."""
+    try:
+        data = pd.DataFrame({'feature': feat_values, 'target': target_values}).dropna()
+        if len(data) < 50 or data['target'].nunique() < 2:
+            return None, None, None
+
+        auc = roc_auc_score(data['target'], data['feature'])
+        gini = 2 * auc - 1
+        fpr, tpr, _ = roc_curve(data['target'], data['feature'])
+        ks = float(max(tpr - fpr))
+        return float(auc), float(gini), ks
+    except Exception:
+        return None, None, None
+
+
+def _iv_category_label(iv: Optional[float]) -> str:
+    """Return IV strength category label."""
+    if iv is None:
+        return "unknown"
+    if iv < 0.02:
+        return "useless"
+    if iv < 0.10:
+        return "weak"
+    if iv < 0.30:
+        return "medium"
+    if iv < 0.50:
+        return "strong"
+    return "suspicious"
+
+
+def _compute_iv_feature_metrics(
+    feat_name: str,
+    feat_values: np.ndarray,
+    target_values: np.ndarray,
+    n_bins: int,
+    min_iv: float,
+    max_iv: float,
+) -> Dict:
+    """Compute IV + univariate metrics for one feature (picklable, for joblib)."""
+    iv = _calculate_iv_static(feat_values, target_values, n_bins)
+    iv_category = _iv_category_label(iv)
+    uni_auc, uni_gini, uni_ks = _calculate_univariate_metrics_static(
+        feat_values, target_values
+    )
+
+    reason = ""
+    if iv is None:
+        status = "Eliminated"
+        reason = "Could not calculate IV"
+    elif iv < min_iv:
+        status = "Eliminated"
+        reason = f"IV {iv:.4f} < {min_iv} (useless)"
+    elif iv > max_iv:
+        status = "Eliminated"
+        reason = f"IV {iv:.4f} > {max_iv} (suspicious)"
+    else:
+        status = "Kept"
+
+    return {
+        'Feature': feat_name,
+        'IV_Score': round(iv, 4) if iv is not None else None,
+        'IV_Category': iv_category,
+        'Univariate_AUC': round(uni_auc, 4) if uni_auc else None,
+        'Univariate_Gini': round(uni_gini, 4) if uni_gini else None,
+        'Univariate_KS': round(uni_ks, 4) if uni_ks else None,
+        'Status': status,
+        'Reason': reason,
+    }
+
+
 class IVEliminator(BaseEliminator):
     """Remove features with low or suspicious Information Value."""
 
@@ -167,10 +278,12 @@ class IVEliminator(BaseEliminator):
         min_iv: float = 0.02,
         max_iv: float = 0.50,
         n_bins: int = 10,
+        n_jobs: int = 1,
     ):
         self.min_iv = min_iv
         self.max_iv = max_iv
         self.n_bins = n_bins
+        self.n_jobs = n_jobs
 
     def eliminate(
         self,
@@ -179,43 +292,24 @@ class IVEliminator(BaseEliminator):
         features: List[str],
         **kwargs,
     ) -> EliminationResult:
+        target_values = y_train.values
+
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_compute_iv_feature_metrics)(
+                feat, X_train[feat].values, target_values,
+                self.n_bins, self.min_iv, self.max_iv,
+            )
+            for feat in features
+        )
+
         rows = []
         kept, eliminated = [], []
-
-        for feat in features:
-            iv = self._calculate_iv(X_train[feat], y_train)
-            iv_category = self._iv_category(iv)
-            uni_auc, uni_gini, uni_ks = self._calculate_univariate_metrics(
-                X_train[feat], y_train
-            )
-
-            reason = ""
-            if iv is None:
-                eliminated.append(feat)
-                reason = "Could not calculate IV"
-                status = "Eliminated"
-            elif iv < self.min_iv:
-                eliminated.append(feat)
-                reason = f"IV {iv:.4f} < {self.min_iv} (useless)"
-                status = "Eliminated"
-            elif iv > self.max_iv:
-                eliminated.append(feat)
-                reason = f"IV {iv:.4f} > {self.max_iv} (suspicious)"
-                status = "Eliminated"
+        for row in results:
+            rows.append(row)
+            if row['Status'] == 'Kept':
+                kept.append(row['Feature'])
             else:
-                kept.append(feat)
-                status = "Kept"
-
-            rows.append({
-                'Feature': feat,
-                'IV_Score': round(iv, 4) if iv is not None else None,
-                'IV_Category': iv_category,
-                'Univariate_AUC': round(uni_auc, 4) if uni_auc else None,
-                'Univariate_Gini': round(uni_gini, 4) if uni_gini else None,
-                'Univariate_KS': round(uni_ks, 4) if uni_ks else None,
-                'Status': status,
-                'Reason': reason,
-            })
+                eliminated.append(row['Feature'])
 
         details_df = pd.DataFrame(rows).sort_values(
             'IV_Score', ascending=False, na_position='last'
@@ -412,6 +506,95 @@ class HalfSplitPSICheck(PSICheck):
 
 
 # ──────────────────────────────────────────────────────────────
+# PSI helpers (module-level, picklable for joblib)
+# ──────────────────────────────────────────────────────────────
+
+def _calculate_psi_static(
+    expected: np.ndarray, actual: np.ndarray, n_bins: int
+) -> Optional[float]:
+    """Calculate PSI between two distributions (module-level, picklable)."""
+    try:
+        if len(expected) < 10 or len(actual) < 10:
+            return None
+
+        try:
+            _, bins = pd.qcut(
+                expected, q=n_bins, retbins=True, duplicates='drop'
+            )
+        except ValueError:
+            n = min(5, len(np.unique(expected)))
+            if n < 2:
+                return None
+            _, bins = pd.qcut(expected, q=n, retbins=True, duplicates='drop')
+
+        bins[0] = -np.inf
+        bins[-1] = np.inf
+
+        expected_bins = pd.cut(expected, bins=bins)
+        actual_bins = pd.cut(actual, bins=bins)
+
+        expected_pct = (
+            pd.Series(expected_bins).value_counts(normalize=True).sort_index()
+        )
+        actual_pct = (
+            pd.Series(actual_bins).value_counts(normalize=True).sort_index()
+        )
+
+        all_bins_idx = expected_pct.index.union(actual_pct.index)
+        expected_pct = expected_pct.reindex(all_bins_idx, fill_value=0.0001)
+        actual_pct = actual_pct.reindex(all_bins_idx, fill_value=0.0001)
+
+        epsilon = 1e-4
+        expected_pct = expected_pct.clip(lower=epsilon)
+        actual_pct = actual_pct.clip(lower=epsilon)
+
+        psi = float(
+            ((actual_pct - expected_pct) * np.log(actual_pct / expected_pct)).sum()
+        )
+        return psi if np.isfinite(psi) else None
+    except Exception:
+        return None
+
+
+def _compute_psi_for_feature(
+    feat_name: str,
+    feat_values: np.ndarray,
+    all_splits: List[Tuple[str, np.ndarray, np.ndarray]],
+    n_bins: int,
+    critical_threshold: float,
+) -> Dict:
+    """Compute PSI across all splits for one feature (picklable, for joblib)."""
+    psi_results = {}
+    for label, base_mask, comp_mask in all_splits:
+        base_vals = feat_values[base_mask]
+        comp_vals = feat_values[comp_mask]
+        base_vals = base_vals[~pd.isna(base_vals)]
+        comp_vals = comp_vals[~pd.isna(comp_vals)]
+        psi_results[label] = _calculate_psi_static(base_vals, comp_vals, n_bins)
+
+    valid_psis = [v for v in psi_results.values() if v is not None]
+    max_psi = max(valid_psis) if valid_psis else 0.0
+    mean_psi = float(np.mean(valid_psis)) if valid_psis else 0.0
+
+    if max_psi >= critical_threshold:
+        status = "Eliminated"
+        reason = f"Max PSI {max_psi:.4f} >= {critical_threshold}"
+    else:
+        status = "Kept"
+        reason = ""
+
+    row = {'Feature': feat_name}
+    for label, _, _ in all_splits:
+        v = psi_results.get(label)
+        row[f'PSI_{label}'] = round(v, 4) if v is not None else None
+    row['Max_PSI'] = round(max_psi, 4)
+    row['Mean_PSI'] = round(mean_psi, 4)
+    row['Status'] = status
+    row['Reason'] = reason
+    return row
+
+
+# ──────────────────────────────────────────────────────────────
 # PSI Eliminator
 # ──────────────────────────────────────────────────────────────
 
@@ -433,10 +616,12 @@ class PSIEliminator(BaseEliminator):
         critical_threshold: float = 0.25,
         n_bins: int = 10,
         checks: Optional[List[PSICheck]] = None,
+        n_jobs: int = 1,
     ):
         self.critical_threshold = critical_threshold
         self.n_bins = n_bins
         self.checks = checks if checks is not None else [QuarterlyPSICheck()]
+        self.n_jobs = n_jobs
 
     def eliminate(
         self,
@@ -478,43 +663,22 @@ class PSIEliminator(BaseEliminator):
             f"{len(all_splits)} comparisons"
         )
 
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_compute_psi_for_feature)(
+                feat, X_train[feat].values, all_splits,
+                self.n_bins, self.critical_threshold,
+            )
+            for feat in features
+        )
+
         rows = []
         kept, eliminated = [], []
-
-        for feat in features:
-            values = X_train[feat].values
-
-            psi_results = {}
-            for label, base_mask, comp_mask in all_splits:
-                base_vals = values[base_mask]
-                comp_vals = values[comp_mask]
-                # Drop NaN
-                base_vals = base_vals[~pd.isna(base_vals)]
-                comp_vals = comp_vals[~pd.isna(comp_vals)]
-                psi_results[label] = self._calculate_psi(base_vals, comp_vals)
-
-            valid_psis = [v for v in psi_results.values() if v is not None]
-            max_psi = max(valid_psis) if valid_psis else 0.0
-            mean_psi = float(np.mean(valid_psis)) if valid_psis else 0.0
-
-            if max_psi >= self.critical_threshold:
-                eliminated.append(feat)
-                status = "Eliminated"
-                reason = f"Max PSI {max_psi:.4f} >= {self.critical_threshold}"
-            else:
-                kept.append(feat)
-                status = "Kept"
-                reason = ""
-
-            row = {'Feature': feat}
-            for label in split_labels:
-                v = psi_results.get(label)
-                row[f'PSI_{label}'] = round(v, 4) if v is not None else None
-            row['Max_PSI'] = round(max_psi, 4)
-            row['Mean_PSI'] = round(mean_psi, 4)
-            row['Status'] = status
-            row['Reason'] = reason
+        for row in results:
             rows.append(row)
+            if row['Status'] == 'Kept':
+                kept.append(row['Feature'])
+            else:
+                eliminated.append(row['Feature'])
 
         details_df = pd.DataFrame(rows).sort_values(
             'Max_PSI', ascending=False
@@ -529,49 +693,7 @@ class PSIEliminator(BaseEliminator):
         self, expected: np.ndarray, actual: np.ndarray
     ) -> Optional[float]:
         """Calculate PSI between two distributions."""
-        try:
-            if len(expected) < 10 or len(actual) < 10:
-                return None
-
-            # Create bins from expected distribution
-            try:
-                _, bins = pd.qcut(
-                    expected, q=self.n_bins, retbins=True, duplicates='drop'
-                )
-            except ValueError:
-                n = min(5, len(np.unique(expected)))
-                if n < 2:
-                    return None
-                _, bins = pd.qcut(expected, q=n, retbins=True, duplicates='drop')
-
-            bins[0] = -np.inf
-            bins[-1] = np.inf
-
-            expected_bins = pd.cut(expected, bins=bins)
-            actual_bins = pd.cut(actual, bins=bins)
-
-            expected_pct = (
-                pd.Series(expected_bins).value_counts(normalize=True).sort_index()
-            )
-            actual_pct = (
-                pd.Series(actual_bins).value_counts(normalize=True).sort_index()
-            )
-
-            all_bins = expected_pct.index.union(actual_pct.index)
-            expected_pct = expected_pct.reindex(all_bins, fill_value=0.0001)
-            actual_pct = actual_pct.reindex(all_bins, fill_value=0.0001)
-
-            # Clip to avoid log(0) and division by zero
-            epsilon = 1e-4
-            expected_pct = expected_pct.clip(lower=epsilon)
-            actual_pct = actual_pct.clip(lower=epsilon)
-
-            psi = float(
-                ((actual_pct - expected_pct) * np.log(actual_pct / expected_pct)).sum()
-            )
-            return psi if np.isfinite(psi) else None
-        except Exception:
-            return None
+        return _calculate_psi_static(expected, actual, self.n_bins)
 
 
 class CorrelationEliminator(BaseEliminator):
@@ -682,4 +804,185 @@ class CorrelationEliminator(BaseEliminator):
         )
         return EliminationResult(
             self.step_name, kept, eliminated_list, details_df
+        )
+
+
+class VIFEliminator(BaseEliminator):
+    """
+    Remove multicollinear features using Variance Inflation Factor.
+
+    Iteratively removes features with VIF above threshold until all VIF <= threshold.
+    When iv_aware=True, among features exceeding the threshold, the one with lowest IV
+    is dropped first (preserving more predictive features).
+    """
+
+    step_name = "07_VIF"
+
+    def __init__(self, threshold: float = 5.0, iv_aware: bool = True):
+        self.threshold = threshold
+        self.iv_aware = iv_aware
+
+    def eliminate(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        features: List[str],
+        iv_scores: Optional[Dict[str, float]] = None,
+        **kwargs,
+    ) -> EliminationResult:
+        current_features = list(features)
+
+        logger.info(
+            f"VIF | Starting VIF check with {len(current_features)} features, "
+            f"threshold={self.threshold}"
+        )
+
+        # Edge case: 0, 1, or 2 features — return immediately without VIF check
+        if len(current_features) <= 2:
+            logger.info(
+                f"VIF | Only {len(current_features)} feature(s), "
+                f"skipping VIF check"
+            )
+            details_df = pd.DataFrame({
+                'Feature': current_features,
+                'VIF_Initial': np.nan,
+                'VIF_Final': np.nan,
+                'IV_Score': [
+                    round((iv_scores or {}).get(f, 0) or 0, 4)
+                    for f in current_features
+                ],
+                'Status': 'Kept',
+                'Elimination_Round': np.nan,
+            })
+            return EliminationResult(
+                self.step_name, list(current_features), [], details_df
+            )
+
+        # Track initial VIF values and elimination rounds
+        vif_initial: Dict[str, float] = {}
+        elimination_log: List[Dict[str, Any]] = []
+        iteration = 0
+
+        while len(current_features) > 1:
+            iteration += 1
+
+            # Compute VIF using correlation matrix inverse
+            corr = X_train[current_features].corr().values
+            try:
+                inv = np.linalg.inv(corr)
+            except np.linalg.LinAlgError:
+                inv = np.linalg.pinv(corr)
+            vif_values = pd.Series(np.diag(inv), index=current_features)
+
+            # Record initial VIF on first iteration
+            if iteration == 1:
+                for feat in current_features:
+                    vif_initial[feat] = round(float(vif_values[feat]), 4)
+
+            max_vif = vif_values.max()
+            max_vif_feat = vif_values.idxmax()
+
+            if max_vif <= self.threshold:
+                logger.info(
+                    f"VIF | Iteration {iteration}: max VIF={max_vif:.4f}, "
+                    f"all features below threshold"
+                )
+                break
+
+            # Determine which feature to drop
+            high_vif_features = vif_values[vif_values > self.threshold]
+
+            if self.iv_aware and iv_scores:
+                # Among features with VIF > threshold, drop the one with lowest IV
+                iv_of_high_vif = {
+                    f: (iv_scores.get(f, 0) or 0) for f in high_vif_features.index
+                }
+                drop_feat = min(iv_of_high_vif, key=iv_of_high_vif.get)
+                drop_vif = float(vif_values[drop_feat])
+                drop_iv = iv_of_high_vif[drop_feat]
+                logger.info(
+                    f"VIF | Iteration {iteration}: max VIF={max_vif:.4f} "
+                    f"({max_vif_feat}), dropping {drop_feat} "
+                    f"(VIF={drop_vif:.4f}, IV={drop_iv:.4f}, "
+                    f"lowest IV among high-VIF)"
+                )
+            else:
+                # Drop the feature with the highest VIF
+                drop_feat = max_vif_feat
+                drop_vif = float(max_vif)
+                drop_iv = (iv_scores or {}).get(drop_feat, 0) or 0
+                logger.info(
+                    f"VIF | Iteration {iteration}: Dropped {drop_feat} "
+                    f"(VIF={drop_vif:.4f}, IV={drop_iv:.4f})"
+                )
+
+            elimination_log.append({
+                'Feature': drop_feat,
+                'VIF_at_Drop': round(drop_vif, 4),
+                'IV_Score': round(drop_iv, 4),
+                'Elimination_Round': iteration,
+            })
+
+            # Record initial VIF for features that didn't exist on iteration 1
+            # (shouldn't happen, but safe)
+            if drop_feat not in vif_initial:
+                vif_initial[drop_feat] = round(drop_vif, 4)
+
+            current_features.remove(drop_feat)
+
+        # Compute final VIF for kept features
+        vif_final: Dict[str, float] = {}
+        if len(current_features) > 2:
+            corr = X_train[current_features].corr().values
+            try:
+                inv = np.linalg.inv(corr)
+            except np.linalg.LinAlgError:
+                inv = np.linalg.pinv(corr)
+            final_vif_values = pd.Series(np.diag(inv), index=current_features)
+            for feat in current_features:
+                vif_final[feat] = round(float(final_vif_values[feat]), 4)
+        elif len(current_features) > 0:
+            # 1-2 features remaining, VIF is not meaningful
+            for feat in current_features:
+                vif_final[feat] = np.nan
+
+        # Build eliminated features list
+        eliminated_features = [entry['Feature'] for entry in elimination_log]
+
+        # Build details DataFrame
+        rows = []
+        for feat in features:
+            if feat in current_features:
+                rows.append({
+                    'Feature': feat,
+                    'VIF_Initial': vif_initial.get(feat, np.nan),
+                    'VIF_Final': vif_final.get(feat, np.nan),
+                    'IV_Score': round((iv_scores or {}).get(feat, 0) or 0, 4),
+                    'Status': 'Kept',
+                    'Elimination_Round': np.nan,
+                })
+            else:
+                entry = next(
+                    (e for e in elimination_log if e['Feature'] == feat), None
+                )
+                rows.append({
+                    'Feature': feat,
+                    'VIF_Initial': vif_initial.get(feat, np.nan),
+                    'VIF_Final': np.nan,
+                    'IV_Score': round((iv_scores or {}).get(feat, 0) or 0, 4),
+                    'Status': 'Eliminated',
+                    'Elimination_Round': (
+                        entry['Elimination_Round'] if entry else np.nan
+                    ),
+                })
+
+        details_df = pd.DataFrame(rows)
+
+        logger.info(
+            f"VIF | Eliminated {len(eliminated_features)} features "
+            f"({len(current_features)} remaining)"
+        )
+        return EliminationResult(
+            self.step_name, list(current_features), eliminated_features,
+            details_df
         )
