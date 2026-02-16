@@ -12,10 +12,13 @@ from datetime import datetime
 from pathlib import Path
 import itertools
 import json
+import logging
 import yaml
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -252,13 +255,46 @@ class FeatureFactory:
                 bureau_copy[col] = pd.to_datetime(bureau_copy[col], errors='coerce')
         
         if parallel:
-            return self._generate_features_parallel(
+            result_df = self._generate_features_parallel(
                 applications_df, bureau_copy, reference_date_col, n_jobs
             )
         else:
-            return self._generate_features_vectorized(
+            result_df = self._generate_features_vectorized(
                 applications_df, bureau_copy, reference_date_col
             )
+
+        # Ensure uniqueness at uid level
+        if 'uid' in result_df.columns:
+            n_before = len(result_df)
+            result_df = result_df.drop_duplicates(subset=['uid'], keep='first')
+            n_after = len(result_df)
+            if n_before != n_after:
+                logger.warning(f"Removed {n_before - n_after} duplicate uid rows")
+
+        # Summary: input vs output row count reconciliation
+        n_input = len(applications_df)
+        n_output = len(result_df)
+        if n_input != n_output:
+            logger.warning(
+                f"Row count mismatch: {n_input} input applications -> {n_output} output rows "
+                f"({n_input - n_output} rows lost)"
+            )
+        else:
+            logger.info(f"Feature generation complete: {n_output} rows, {len(result_df.columns)} columns")
+
+        # Check for rows with all-NaN features (failed generation)
+        feature_cols = [c for c in result_df.columns if c not in
+                        ['uid', 'application_id', 'customer_id', 'applicant_type',
+                         'application_date', 'target']]
+        if feature_cols and n_output > 0:
+            all_nan = result_df[feature_cols].isna().all(axis=1).sum()
+            if all_nan > 0:
+                logger.warning(
+                    f"{all_nan} rows have all-NaN features (generation errors, "
+                    f"{all_nan / n_output * 100:.1f}%)"
+                )
+
+        return result_df
     
     def _generate_features_vectorized(
         self,
@@ -297,7 +333,21 @@ class FeatureFactory:
                 app_row, customer_data, ref_date
             )
             results.append(feature_row)
-        
+
+        # Log success/failure summary
+        total = len(results)
+        if total > 0:
+            # A failed row will only have the core columns (5-6 keys)
+            failed = sum(1 for r in results if len(r) <= 7)
+            succeeded = total - failed
+            if failed > 0:
+                logger.warning(
+                    f"Feature generation: {succeeded}/{total} succeeded, "
+                    f"{failed}/{total} failed (returned with NaN features)"
+                )
+            else:
+                logger.info(f"Feature generation: all {total} rows succeeded")
+
         return pd.DataFrame(results)
     
     def _generate_features_parallel(
@@ -359,9 +409,21 @@ class FeatureFactory:
         reference_date_col: str
     ) -> dict:
         """Process a single application for parallel execution."""
-        app_row = pd.Series(app_row_dict)
-        ref_date = pd.to_datetime(app_row[reference_date_col])
-        return self._generate_customer_features(app_row, customer_data, ref_date)
+        try:
+            app_row = pd.Series(app_row_dict)
+            ref_date = pd.to_datetime(app_row[reference_date_col])
+            return self._generate_customer_features(app_row, customer_data, ref_date)
+        except Exception as e:
+            app_id = app_row_dict.get('application_id', 'unknown')
+            cust_id = app_row_dict.get('customer_id', 'unknown')
+            logger.warning(f"Feature generation failed for app={app_id}, cust={cust_id}: {e}")
+            return {
+                'application_id': app_id,
+                'customer_id': cust_id,
+                'applicant_type': app_row_dict.get('applicant_type', 'PRIMARY'),
+                'application_date': app_row_dict.get('application_date'),
+                'target': app_row_dict.get('target', 0),
+            }
     
     def _build_feature_name_cache(self) -> None:
         """Pre-compute all feature names to avoid string operations in loops."""
@@ -1670,292 +1732,301 @@ class FeatureFactory:
     ) -> Dict[str, Any]:
         """Generate all features for a single customer."""
         features = {
+            'uid': app_row.get('uid', f"{app_row['application_id']}||{app_row['customer_id']}"),
             'application_id': app_row['application_id'],
             'customer_id': app_row['customer_id'],
             'applicant_type': app_row.get('applicant_type', 'PRIMARY'),
             'application_date': app_row.get('application_date'),
             'target': app_row.get('target', 0),
         }
+
+        try:
+            # Filter to credit products only for most features
+            credit_data = customer_data[
+                customer_data['product_type'].isin(self.CREDIT_PRODUCTS)
+            ]
         
-        # Filter to credit products only for most features
-        credit_data = customer_data[
-            customer_data['product_type'].isin(self.CREDIT_PRODUCTS)
-        ]
+            # Non-credit signals data
+            non_credit_data = customer_data[
+                customer_data['product_type'].isin(self.NON_CREDIT_PRODUCTS)
+            ]
         
-        # Non-credit signals data
-        non_credit_data = customer_data[
-            customer_data['product_type'].isin(self.NON_CREDIT_PRODUCTS)
-        ]
+            # Skip list for duplicates (keep better-named versions)
+            SKIP_READABLE_COUNTS = {'defaulted_count', 'recovered_count'}
+            SKIP_READABLE_AMOUNTS = {
+                'total_credit_max_amount', 'total_credit_min_amount',
+                'defaulted_average_amount', 'defaulted_max_amount'
+            }
         
-        # Skip list for duplicates (keep better-named versions)
-        SKIP_READABLE_COUNTS = {'defaulted_count', 'recovered_count'}
-        SKIP_READABLE_AMOUNTS = {
-            'total_credit_max_amount', 'total_credit_min_amount',
-            'defaulted_average_amount', 'defaulted_max_amount'
-        }
+            # === OPTIMIZED: Pre-compute all masks once ===
+            n_credit = len(credit_data)
         
-        # === OPTIMIZED: Pre-compute all masks once ===
-        n_credit = len(credit_data)
-        
-        if n_credit > 0:
-            # Pre-compute product masks
-            product_masks = {'all': pd.Series(True, index=credit_data.index)}
-            for product in self.PRODUCT_TYPES[1:]:  # Skip 'all'
-                product_type = product.filter_expr.split("'")[1] if product.filter_expr else None
-                if product_type:
-                    product_masks[product.code] = credit_data['product_type'] == product_type
-                else:
-                    product_masks[product.code] = pd.Series(True, index=credit_data.index)
-            
-            # Pre-compute time window masks
-            window_masks = {'all': pd.Series(True, index=credit_data.index)}
-            if 'opening_date' in credit_data.columns:
-                for window in self.TIME_WINDOWS[1:]:  # Skip 'all'
-                    if window.months:
-                        cutoff = ref_date - pd.DateOffset(months=window.months)
-                        window_masks[window.code] = credit_data['opening_date'] >= cutoff
+            if n_credit > 0:
+                # Pre-compute product masks
+                product_masks = {'all': pd.Series(True, index=credit_data.index)}
+                for product in self.PRODUCT_TYPES[1:]:  # Skip 'all'
+                    product_type = product.filter_expr.split("'")[1] if product.filter_expr else None
+                    if product_type:
+                        product_masks[product.code] = credit_data['product_type'] == product_type
                     else:
-                        window_masks[window.code] = pd.Series(True, index=credit_data.index)
-            else:
-                for window in self.TIME_WINDOWS[1:]:
-                    window_masks[window.code] = pd.Series(True, index=credit_data.index)
+                        product_masks[product.code] = pd.Series(True, index=credit_data.index)
             
-            # Pre-compute status masks
-            status_masks = {'all': pd.Series(True, index=credit_data.index)}
-            status_masks['active'] = credit_data['default_date'].isna()
-            status_masks['defaulted'] = credit_data['default_date'].notna()
-            status_masks['recovered'] = credit_data['recovery_date'].notna()
-            
-            # Get amounts array once
-            amounts = credit_data['total_amount'].values if 'total_amount' in credit_data.columns else None
-            
-            # === Generate features using pre-computed masks (no DataFrame copying!) ===
-            for product in self.PRODUCT_TYPES:
-                p_mask = product_masks[product.code]
-                for window in self.TIME_WINDOWS:
-                    w_mask = window_masks[window.code]
-                    pw_mask = p_mask & w_mask
-                    for status in self.STATUS_FILTERS:
-                        s_mask = status_masks[status.code]
-                        final_mask = pw_mask & s_mask
-                        count = final_mask.sum()
-                        
-                        # Count with cached readable name
-                        cnt_readable = self._get_cached_name(
-                            product.code, window.code, status.code, 'cnt'
-                        )
-                        if cnt_readable not in SKIP_READABLE_COUNTS:
-                            features[cnt_readable] = count
-                        
-                        # Amount aggregations
-                        if amounts is not None and count > 0:
-                            filtered_amounts = amounts[final_mask.values]
-                            for agg_code in ['sum', 'avg', 'max', 'min', 'std']:
-                                amt_readable = self._get_cached_name(
-                                    product.code, window.code, status.code, agg_code
-                                )
-                                if amt_readable in SKIP_READABLE_AMOUNTS:
-                                    continue
-                                if agg_code == 'sum':
-                                    features[amt_readable] = filtered_amounts.sum()
-                                elif agg_code == 'avg':
-                                    features[amt_readable] = filtered_amounts.mean()
-                                elif agg_code == 'max':
-                                    features[amt_readable] = filtered_amounts.max()
-                                elif agg_code == 'min':
-                                    features[amt_readable] = filtered_amounts.min()
-                                elif agg_code == 'std':
-                                    features[amt_readable] = filtered_amounts.std() if len(filtered_amounts) > 1 else 0
+                # Pre-compute time window masks
+                window_masks = {'all': pd.Series(True, index=credit_data.index)}
+                if 'opening_date' in credit_data.columns:
+                    for window in self.TIME_WINDOWS[1:]:  # Skip 'all'
+                        if window.months:
+                            cutoff = ref_date - pd.DateOffset(months=window.months)
+                            window_masks[window.code] = credit_data['opening_date'] >= cutoff
                         else:
+                            window_masks[window.code] = pd.Series(True, index=credit_data.index)
+                else:
+                    for window in self.TIME_WINDOWS[1:]:
+                        window_masks[window.code] = pd.Series(True, index=credit_data.index)
+            
+                # Pre-compute status masks
+                status_masks = {'all': pd.Series(True, index=credit_data.index)}
+                status_masks['active'] = credit_data['default_date'].isna()
+                status_masks['defaulted'] = credit_data['default_date'].notna()
+                status_masks['recovered'] = credit_data['recovery_date'].notna()
+            
+                # Get amounts array once
+                amounts = credit_data['total_amount'].values if 'total_amount' in credit_data.columns else None
+            
+                # === Generate features using pre-computed masks (no DataFrame copying!) ===
+                for product in self.PRODUCT_TYPES:
+                    p_mask = product_masks[product.code]
+                    for window in self.TIME_WINDOWS:
+                        w_mask = window_masks[window.code]
+                        pw_mask = p_mask & w_mask
+                        for status in self.STATUS_FILTERS:
+                            s_mask = status_masks[status.code]
+                            final_mask = pw_mask & s_mask
+                            count = final_mask.sum()
+                        
+                            # Count with cached readable name
+                            cnt_readable = self._get_cached_name(
+                                product.code, window.code, status.code, 'cnt'
+                            )
+                            if cnt_readable not in SKIP_READABLE_COUNTS:
+                                features[cnt_readable] = count
+                        
+                            # Amount aggregations
+                            if amounts is not None and count > 0:
+                                filtered_amounts = amounts[final_mask.values]
+                                for agg_code in ['sum', 'avg', 'max', 'min', 'std']:
+                                    amt_readable = self._get_cached_name(
+                                        product.code, window.code, status.code, agg_code
+                                    )
+                                    if amt_readable in SKIP_READABLE_AMOUNTS:
+                                        continue
+                                    if agg_code == 'sum':
+                                        features[amt_readable] = filtered_amounts.sum()
+                                    elif agg_code == 'avg':
+                                        features[amt_readable] = filtered_amounts.mean()
+                                    elif agg_code == 'max':
+                                        features[amt_readable] = filtered_amounts.max()
+                                    elif agg_code == 'min':
+                                        features[amt_readable] = filtered_amounts.min()
+                                    elif agg_code == 'std':
+                                        features[amt_readable] = filtered_amounts.std() if len(filtered_amounts) > 1 else 0
+                            else:
+                                for agg_code in ['sum', 'avg', 'max', 'min', 'std']:
+                                    amt_readable = self._get_cached_name(
+                                        product.code, window.code, status.code, agg_code
+                                    )
+                                    if amt_readable not in SKIP_READABLE_AMOUNTS:
+                                        features[amt_readable] = 0
+            else:
+                # Empty credit data - set all to zero
+                for product in self.PRODUCT_TYPES:
+                    for window in self.TIME_WINDOWS:
+                        for status in self.STATUS_FILTERS:
+                            cnt_readable = self._get_cached_name(
+                                product.code, window.code, status.code, 'cnt'
+                            )
+                            if cnt_readable not in SKIP_READABLE_COUNTS:
+                                features[cnt_readable] = 0
                             for agg_code in ['sum', 'avg', 'max', 'min', 'std']:
                                 amt_readable = self._get_cached_name(
                                     product.code, window.code, status.code, agg_code
                                 )
                                 if amt_readable not in SKIP_READABLE_AMOUNTS:
                                     features[amt_readable] = 0
-        else:
-            # Empty credit data - set all to zero
-            for product in self.PRODUCT_TYPES:
-                for window in self.TIME_WINDOWS:
-                    for status in self.STATUS_FILTERS:
-                        cnt_readable = self._get_cached_name(
-                            product.code, window.code, status.code, 'cnt'
-                        )
-                        if cnt_readable not in SKIP_READABLE_COUNTS:
-                            features[cnt_readable] = 0
-                        for agg_code in ['sum', 'avg', 'max', 'min', 'std']:
-                            amt_readable = self._get_cached_name(
-                                product.code, window.code, status.code, agg_code
-                            )
-                            if amt_readable not in SKIP_READABLE_AMOUNTS:
-                                features[amt_readable] = 0
         
-        # === COMPREHENSIVE PRE-COMPUTED CACHE FOR ALL HELPER METHODS ===
-        # This eliminates redundant filtering across 27 helper methods
-        if n_credit > 0:
-            # Pre-compute common filtered subsets (used by 15+ methods)
-            defaulted = credit_data[credit_data['default_date'].notna()]
-            recovered = credit_data[credit_data['recovery_date'].notna()]
-            active = credit_data[credit_data['default_date'].isna()]
+            # === COMPREHENSIVE PRE-COMPUTED CACHE FOR ALL HELPER METHODS ===
+            # This eliminates redundant filtering across 27 helper methods
+            if n_credit > 0:
+                # Pre-compute common filtered subsets (used by 15+ methods)
+                defaulted = credit_data[credit_data['default_date'].notna()]
+                recovered = credit_data[credit_data['recovery_date'].notna()]
+                active = credit_data[credit_data['default_date'].isna()]
             
-            # Pre-compute sorted data (used by 8+ methods)
-            sorted_data = credit_data.sort_values('opening_date') if 'opening_date' in credit_data.columns else credit_data
+                # Pre-compute sorted data (used by 8+ methods)
+                sorted_data = credit_data.sort_values('opening_date') if 'opening_date' in credit_data.columns else credit_data
             
-            # Pre-compute ages array (used by 6+ methods)
-            if 'opening_date' in credit_data.columns:
-                ages_days = (ref_date - credit_data['opening_date']).dt.days
-                ages_months = ages_days / 30.44
-            else:
-                ages_days = pd.Series([0] * n_credit, index=credit_data.index)
-                ages_months = ages_days
-            
-            # Pre-compute amounts (used by 10+ methods)
-            amounts = credit_data['total_amount'] if 'total_amount' in credit_data.columns else pd.Series([0] * n_credit, index=credit_data.index)
-            total_amount = amounts.sum()
-            
-            # Pre-compute opening dates list (used by interval/burst features)
-            dates_list = sorted_data['opening_date'].tolist() if 'opening_date' in sorted_data.columns else []
-            
-            # Pre-compute product masks for helper methods
-            product_data = {}
-            for product in self.PRODUCT_TYPES[1:]:
-                prod_code = product.filter_expr.split("'")[1] if product.filter_expr else None
-                if prod_code:
-                    product_data[product.code] = credit_data[credit_data['product_type'] == prod_code]
+                # Pre-compute ages array (used by 6+ methods)
+                if 'opening_date' in credit_data.columns:
+                    ages_days = (ref_date - credit_data['opening_date']).dt.days
+                    ages_months = ages_days / 30.44
                 else:
-                    product_data[product.code] = pd.DataFrame()
+                    ages_days = pd.Series([0] * n_credit, index=credit_data.index)
+                    ages_months = ages_days
             
-            _cache = {
-                'defaulted': defaulted,
-                'recovered': recovered,
-                'active': active,
-                'sorted_data': sorted_data,
-                'ages_days': ages_days,
-                'ages_months': ages_months,
-                'amounts': amounts,
-                'total_amount': total_amount,
-                'dates_list': dates_list,
-                'product_data': product_data,
-                'n_credit': n_credit,
-                'ref_date': ref_date,
-            }
-        else:
-            # Empty cache for zero-credit case
-            _cache = {
-                'defaulted': credit_data,
-                'recovered': credit_data,
-                'active': credit_data,
-                'sorted_data': credit_data,
-                'ages_days': pd.Series([], dtype=float),
-                'ages_months': pd.Series([], dtype=float),
-                'amounts': pd.Series([], dtype=float),
-                'total_amount': 0,
-                'dates_list': [],
-                'product_data': {p.code: pd.DataFrame() for p in self.PRODUCT_TYPES[1:]},
-                'n_credit': 0,
-                'ref_date': ref_date,
-            }
+                # Pre-compute amounts (used by 10+ methods)
+                amounts = credit_data['total_amount'] if 'total_amount' in credit_data.columns else pd.Series([0] * n_credit, index=credit_data.index)
+                total_amount = amounts.sum()
+            
+                # Pre-compute opening dates list (used by interval/burst features)
+                dates_list = sorted_data['opening_date'].tolist() if 'opening_date' in sorted_data.columns else []
+            
+                # Pre-compute product masks for helper methods
+                product_data = {}
+                for product in self.PRODUCT_TYPES[1:]:
+                    prod_code = product.filter_expr.split("'")[1] if product.filter_expr else None
+                    if prod_code:
+                        product_data[product.code] = credit_data[credit_data['product_type'] == prod_code]
+                    else:
+                        product_data[product.code] = pd.DataFrame()
+            
+                _cache = {
+                    'defaulted': defaulted,
+                    'recovered': recovered,
+                    'active': active,
+                    'sorted_data': sorted_data,
+                    'ages_days': ages_days,
+                    'ages_months': ages_months,
+                    'amounts': amounts,
+                    'total_amount': total_amount,
+                    'dates_list': dates_list,
+                    'product_data': product_data,
+                    'n_credit': n_credit,
+                    'ref_date': ref_date,
+                }
+            else:
+                # Empty cache for zero-credit case
+                _cache = {
+                    'defaulted': credit_data,
+                    'recovered': credit_data,
+                    'active': credit_data,
+                    'sorted_data': credit_data,
+                    'ages_days': pd.Series([], dtype=float),
+                    'ages_months': pd.Series([], dtype=float),
+                    'amounts': pd.Series([], dtype=float),
+                    'total_amount': 0,
+                    'dates_list': [],
+                    'product_data': {p.code: pd.DataFrame() for p in self.PRODUCT_TYPES[1:]},
+                    'n_credit': 0,
+                    'ref_date': ref_date,
+                }
         
-        # Generate ratio features (uses existing features dict only)
-        features = self._add_ratio_features(features)
+            # Generate ratio features (uses existing features dict only)
+            features = self._add_ratio_features(features)
         
-        # Generate temporal features (uses cache)
-        features = self._add_temporal_features_optimized(features, credit_data, ref_date, _cache)
+            # Generate temporal features (uses cache)
+            features = self._add_temporal_features_optimized(features, credit_data, ref_date, _cache)
         
-        # Generate trend features (uses existing features dict only)
-        features = self._add_trend_features(features)
+            # Generate trend features (uses existing features dict only)
+            features = self._add_trend_features(features)
         
-        # Generate risk signal features
-        features = self._add_risk_signal_features(features, non_credit_data, credit_data)
+            # Generate risk signal features
+            features = self._add_risk_signal_features(features, non_credit_data, credit_data)
         
-        # Generate diversity features
-        features = self._add_diversity_features(features, credit_data)
+            # Generate diversity features
+            features = self._add_diversity_features(features, credit_data)
         
-        # Generate behavioral features (uses cache)
-        features = self._add_behavioral_features_optimized(features, credit_data, ref_date, _cache)
+            # Generate behavioral features (uses cache)
+            features = self._add_behavioral_features_optimized(features, credit_data, ref_date, _cache)
         
-        # Generate default pattern features (uses cache)
-        features = self._add_default_pattern_features_optimized(features, credit_data, _cache)
+            # Generate default pattern features (uses cache)
+            features = self._add_default_pattern_features_optimized(features, credit_data, _cache)
         
-        # Generate sequence features (uses cache)
-        features = self._add_sequence_features_optimized(features, credit_data, _cache)
+            # Generate sequence features (uses cache)
+            features = self._add_sequence_features_optimized(features, credit_data, _cache)
         
-        # Generate size pattern features
-        features = self._add_amount_features(features, credit_data)
+            # Generate size pattern features
+            features = self._add_amount_features(features, credit_data)
         
-        # Generate burst features (uses cache)
-        features = self._add_burst_features_optimized(features, credit_data, _cache)
+            # Generate burst features (uses cache)
+            features = self._add_burst_features_optimized(features, credit_data, _cache)
         
-        # Generate interval features (uses cache)
-        features = self._add_interval_features_optimized(features, credit_data, _cache)
+            # Generate interval features (uses cache)
+            features = self._add_interval_features_optimized(features, credit_data, _cache)
         
-        # Generate seasonal features
-        features = self._add_seasonal_features(features, credit_data)
+            # Generate seasonal features
+            features = self._add_seasonal_features(features, credit_data)
         
-        # Generate weighted features (uses cache)
-        features = self._add_weighted_features_optimized(features, credit_data, ref_date, _cache)
+            # Generate weighted features (uses cache)
+            features = self._add_weighted_features_optimized(features, credit_data, ref_date, _cache)
         
-        # Generate co-applicant features  
-        features = self._add_co_applicant_features(features, app_row, credit_data)
+            # Generate co-applicant features  
+            features = self._add_co_applicant_features(features, app_row, credit_data)
         
-        # Generate relative features (uses cache)
-        features = self._add_relative_features_optimized(features, credit_data, ref_date, _cache)
+            # Generate relative features (uses cache)
+            features = self._add_relative_features_optimized(features, credit_data, ref_date, _cache)
         
-        # Generate complexity features
-        features = self._add_complexity_features(features, credit_data)
+            # Generate complexity features
+            features = self._add_complexity_features(features, credit_data)
         
-        # Generate time-decay features (uses cache)
-        features = self._add_time_decay_features_optimized(features, credit_data, ref_date, _cache)
+            # Generate time-decay features (uses cache)
+            features = self._add_time_decay_features_optimized(features, credit_data, ref_date, _cache)
         
-        # EXPERT: Generate default lifecycle features
-        features = self._add_default_lifecycle_features(features, credit_data, ref_date)
+            # EXPERT: Generate default lifecycle features
+            features = self._add_default_lifecycle_features(features, credit_data, ref_date)
         
-        # EXPERT: Generate early default features
-        features = self._add_early_default_features(features, credit_data)
+            # EXPERT: Generate early default features
+            features = self._add_early_default_features(features, credit_data)
         
-        # EXPERT: Generate amount tier features
-        features = self._add_amount_tier_features(features, credit_data)
+            # EXPERT: Generate amount tier features
+            features = self._add_amount_tier_features(features, credit_data)
         
-        # EXPERT: Generate cross-product features
-        features = self._add_cross_product_features(features, credit_data)
+            # EXPERT: Generate cross-product features
+            features = self._add_cross_product_features(features, credit_data)
         
-        # EXPERT: Generate freshness features
-        features = self._add_freshness_features(features, credit_data, ref_date)
+            # EXPERT: Generate freshness features
+            features = self._add_freshness_features(features, credit_data, ref_date)
         
-        # EXPERT: Generate concentration features
-        features = self._add_concentration_features(features, credit_data)
+            # EXPERT: Generate concentration features
+            features = self._add_concentration_features(features, credit_data)
         
-        # EXPERT: Generate anomaly features (uses cache)
-        features = self._add_anomaly_features_optimized(features, credit_data, ref_date, _cache)
+            # EXPERT: Generate anomaly features (uses cache)
+            features = self._add_anomaly_features_optimized(features, credit_data, ref_date, _cache)
         
-        # === PAYMENT & DURATION FEATURES (using new fields) ===
+            # === PAYMENT & DURATION FEATURES (using new fields) ===
         
-        # Payment features
-        features = self._add_payment_features(features, credit_data)
+            # Payment features
+            features = self._add_payment_features(features, credit_data)
         
-        # Remaining term features
-        features = self._add_remaining_term_features(features, credit_data, ref_date)
+            # Remaining term features
+            features = self._add_remaining_term_features(features, credit_data, ref_date)
         
-        # Obligation burden features
-        features = self._add_obligation_features(features, credit_data, ref_date)
+            # Obligation burden features
+            features = self._add_obligation_features(features, credit_data, ref_date)
         
-        # DTI proxy features
-        features = self._add_dti_proxy_features(features, credit_data)
+            # DTI proxy features
+            features = self._add_dti_proxy_features(features, credit_data)
         
-        # Maturity features
-        features = self._add_maturity_features(features, credit_data, ref_date)
+            # Maturity features
+            features = self._add_maturity_features(features, credit_data, ref_date)
         
-        # Duration risk features
-        features = self._add_duration_risk_features(features, credit_data)
+            # Duration risk features
+            features = self._add_duration_risk_features(features, credit_data)
         
-        # Payment behavior features
-        features = self._add_payment_behavior_features(features, credit_data)
+            # Payment behavior features
+            features = self._add_payment_behavior_features(features, credit_data)
         
-        # Term structure features
-        features = self._add_term_structure_features(features, credit_data)
-        
+            # Term structure features
+            features = self._add_term_structure_features(features, credit_data)
+
+        except Exception as e:
+            app_id = features.get('application_id', 'unknown')
+            cust_id = features.get('customer_id', 'unknown')
+            logger.warning(f"Feature generation failed for app={app_id}, cust={cust_id}: {e}")
+            # Return features dict with only core columns set.
+            # Missing feature keys will become NaN when pd.DataFrame(results) is built.
+
         return features
-    
+
     def _apply_filters(
         self,
         data: pd.DataFrame,

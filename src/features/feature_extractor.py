@@ -153,12 +153,22 @@ class FeatureExtractor(SparkComponent):
         
         # Fill any remaining nulls
         final_df = final_df.fillna(0)
-        
-        feature_count = len([c for c in final_df.columns if c not in ['application_id', 'customer_id', 'applicant_type', 'application_date', 'target']])
+
+        # Preserve uid from input data, or create if not present
+        if 'uid' not in final_df.columns:
+            final_df = final_df.withColumn(
+                'uid',
+                F.concat(F.col('application_id'), F.lit('||'), F.col('customer_id'))
+            )
+
+        # Ensure uniqueness at uid level
+        final_df = final_df.dropDuplicates(['uid'])
+
+        feature_count = len([c for c in final_df.columns if c not in ['uid', 'application_id', 'customer_id', 'applicant_type', 'application_date', 'target']])
         self.logger.info(f"Generated {feature_count} features")
-        
+
         self._end_execution()
-        
+
         return final_df
     
     def _generate_amount_features(self, df: Any) -> Any:

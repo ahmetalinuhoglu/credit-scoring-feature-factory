@@ -13,9 +13,12 @@ Usage:
 
 from typing import Optional, Iterator
 from datetime import datetime
+import logging
 
 import pandas as pd
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import (
@@ -60,6 +63,7 @@ class SparkFeatureFactory:
         
         # Core identification columns
         fields = [
+            StructField("uid", StringType(), False),
             StructField("application_id", StringType(), True),
             StructField("customer_id", StringType(), True),
             StructField("applicant_type", StringType(), True),
@@ -92,7 +96,7 @@ class SparkFeatureFactory:
         result = self._base_factory.generate_all_features(dummy_apps, dummy_bureau)
         
         for col_name in result.columns:
-            if col_name not in ['application_id', 'customer_id', 'applicant_type', 
+            if col_name not in ['uid', 'application_id', 'customer_id', 'applicant_type',
                                'application_date', 'target']:
                 fields.append(StructField(col_name, DoubleType(), True))
         
@@ -142,39 +146,47 @@ class SparkFeatureFactory:
         @pandas_udf(output_schema, functionType="grouped_map")
         def generate_features_udf(pdf: pd.DataFrame) -> pd.DataFrame:
             """Generate features for a group of applications."""
-            # Initialize factory inside UDF (for Spark serialization)
-            factory = FeatureFactory(factory_config)
-            
-            # Get unique applications in this partition
-            app_cols = ['application_id', 'customer_id', 'applicant_type', 
-                       'application_date', 'target']
-            bureau_cols = ['application_id', 'customer_id', 'product_type',
-                          'total_amount', 'opening_date', 'default_date',
-                          'recovery_date', 'monthly_payment', 'remaining_term_months',
-                          'closure_date']
-            
-            # Extract applications (unique rows)
-            apps_df = pdf[app_cols].drop_duplicates()
-            
-            # Extract bureau data (may have duplicates from join)
-            bureau_cols_present = [c for c in bureau_cols if c in pdf.columns]
-            bureau_df = pdf[bureau_cols_present].drop_duplicates()
-            
-            # Generate features
-            result = factory.generate_all_features(
-                apps_df, 
-                bureau_df,
-                reference_date_col='application_date'
-            )
-            
-            return result
+            try:
+                # Initialize factory inside UDF (for Spark serialization)
+                factory = FeatureFactory(factory_config)
+
+                # Get unique applications in this partition
+                app_cols = ['application_id', 'customer_id', 'applicant_type',
+                           'application_date', 'target']
+                bureau_cols = ['application_id', 'customer_id', 'product_type',
+                              'total_amount', 'opening_date', 'default_date',
+                              'recovery_date', 'monthly_payment', 'remaining_term_months',
+                              'closure_date']
+
+                # Extract applications (unique rows)
+                apps_df = pdf[app_cols].drop_duplicates()
+
+                # Extract bureau data (may have duplicates from join)
+                bureau_cols_present = [c for c in bureau_cols if c in pdf.columns]
+                bureau_df = pdf[bureau_cols_present].drop_duplicates()
+
+                # Generate features
+                result = factory.generate_all_features(
+                    apps_df,
+                    bureau_df,
+                    reference_date_col='application_date'
+                )
+
+                return result
+            except Exception as e:
+                logger.error(f"UDF partition failed: {e}")
+                # Return empty DataFrame matching schema so Spark doesn't lose the partition
+                return pd.DataFrame(columns=[f.name for f in output_schema.fields])
         
         # Apply grouped map UDF
         result_df = joined_df.groupby("application_id").applyInPandas(
             lambda pdf: generate_features_udf.func(pdf),
             schema=output_schema
         )
-        
+
+        # Ensure uniqueness at uid level
+        result_df = result_df.dropDuplicates(["uid"])
+
         return result_df
     
     def generate_all_features_simple(

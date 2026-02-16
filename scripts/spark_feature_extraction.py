@@ -138,7 +138,8 @@ def generate_features_simple(
     logger.info("Mode: simple (collect to driver)")
     apps_pd = apps_df.toPandas()
     bureau_pd = bureau_df.toPandas()
-    logger.info(f"Collected: {len(apps_pd):,} apps, {len(bureau_pd):,} bureau")
+    n_input = len(apps_pd)
+    logger.info(f"Collected: {n_input:,} apps, {len(bureau_pd):,} bureau")
 
     factory = FeatureFactory(config)
     t0 = time.time()
@@ -148,10 +149,16 @@ def generate_features_simple(
         parallel=True,
     )
     elapsed = time.time() - t0
+    n_output = result.shape[0]
     logger.info(
-        f"Generated {result.shape[1]} features for {result.shape[0]:,} rows "
-        f"in {elapsed:.1f}s ({len(apps_pd)/elapsed:.0f} apps/sec)"
+        f"Generated {result.shape[1]} features for {n_output:,} rows "
+        f"in {elapsed:.1f}s ({n_input/elapsed:.0f} apps/sec)"
     )
+    if n_input != n_output:
+        logger.warning(
+            f"Row count mismatch in simple mode: {n_input:,} input apps -> "
+            f"{n_output:,} output rows ({n_input - n_output:,} rows lost)"
+        )
     return spark.createDataFrame(result)
 
 
@@ -163,6 +170,7 @@ def generate_features_distributed(
     from src.features.spark_feature_factory import SparkFeatureFactory
 
     logger.info(f"Mode: distributed ({num_partitions} partitions)")
+    n_input = apps_df.count()
     factory = SparkFeatureFactory(spark, config)
     t0 = time.time()
     result = factory.generate_all_features(
@@ -171,11 +179,78 @@ def generate_features_distributed(
         num_partitions=num_partitions,
     )
     result = result.cache()
-    count = result.count()
+    n_output = result.count()
     elapsed = time.time() - t0
     logger.info(
-        f"Generated features for {count:,} rows in {elapsed:.1f}s "
-        f"({count/elapsed:.0f} apps/sec)"
+        f"Generated features for {n_output:,} rows in {elapsed:.1f}s "
+        f"({n_output/elapsed:.0f} apps/sec)"
+    )
+    if n_input != n_output:
+        logger.warning(
+            f"Row count mismatch in distributed mode: {n_input:,} input apps -> "
+            f"{n_output:,} output rows ({n_input - n_output:,} rows lost)"
+        )
+    return result
+
+
+# ──────────────────────────────────────────────────────────────
+# Validation
+# ──────────────────────────────────────────────────────────────
+
+def validate_output(result: DataFrame, apps_df: DataFrame) -> DataFrame:
+    """Validate feature extraction output quality.
+
+    Checks row count reconciliation, UID uniqueness, null key columns,
+    and failed generation rows. Logs a summary before returning.
+    """
+    result_count = result.count()
+    apps_count = apps_df.count()
+
+    # 1. Row count reconciliation
+    if result_count != apps_count:
+        logger.warning(
+            f"ROW COUNT MISMATCH: Input={apps_count:,}, Output={result_count:,}, "
+            f"Missing={apps_count - result_count:,} rows"
+        )
+    else:
+        logger.info(f"Row count OK: {result_count:,} rows match input")
+
+    # 2. Check for uid uniqueness
+    if 'uid' in result.columns:
+        unique_uids = result.select('uid').distinct().count()
+        if unique_uids != result_count:
+            logger.warning(f"UID NOT UNIQUE: {result_count} rows but {unique_uids} distinct UIDs")
+        else:
+            logger.info(f"UID uniqueness OK: {unique_uids:,} distinct UIDs")
+
+    # 3. Check for null key columns
+    for col_name in ['uid', 'application_id', 'customer_id']:
+        if col_name in result.columns:
+            null_count = result.filter(F.col(col_name).isNull()).count()
+            if null_count > 0:
+                logger.warning(f"Found {null_count} NULL values in {col_name}")
+
+    # 4. Feature completeness check - detect rows where all features are null
+    feature_cols = [c for c in result.columns if c not in
+                    ['uid', 'application_id', 'customer_id', 'applicant_type',
+                     'application_date', 'target']]
+    if feature_cols:
+        # Sample first 50 feature columns to keep the check efficient
+        sample_cols = feature_cols[:50]
+        all_null_condition = F.lit(True)
+        for fc in sample_cols:
+            all_null_condition = all_null_condition & F.col(fc).isNull()
+
+        failed_rows = result.filter(all_null_condition).count()
+        if failed_rows > 0:
+            logger.warning(
+                f"FAILED GENERATION: {failed_rows} rows have ALL sampled features as NULL "
+                f"({failed_rows / result_count * 100:.1f}%)"
+            )
+
+    logger.info(
+        f"Validation complete: {len(feature_cols)} feature columns, "
+        f"{result_count:,} rows"
     )
     return result
 
@@ -308,6 +383,20 @@ def main():
             result = generate_features_simple(
                 spark, apps_df, bureau_df, config,
             )
+
+        # Validate output quality
+        result = validate_output(result, apps_df)
+
+        # Verify uid uniqueness
+        total = result.count()
+        if 'uid' in result.columns:
+            unique_uids = result.select('uid').distinct().count()
+            if total != unique_uids:
+                logger.warning(f"Duplicate UIDs: {total} rows, {unique_uids} unique. Deduplicating...")
+                result = result.dropDuplicates(['uid'])
+                logger.info(f"Deduplicated to {result.count():,} rows")
+            else:
+                logger.info(f"UID uniqueness OK: {total:,} rows")
 
         # Save
         logger.info(f"Saving to {args.output_path}")

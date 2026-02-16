@@ -651,8 +651,8 @@ class TestOutputStructure:
             minimal_application, known_bureau
         )
         
-        core_cols = {'application_id', 'customer_id', 'applicant_type', 'application_date'}
+        core_cols = {'uid', 'application_id', 'customer_id', 'applicant_type', 'application_date'}
         feature_cols = [c for c in result.columns if c not in core_cols]
-        
+
         for col in feature_cols:
             assert pd.api.types.is_numeric_dtype(result[col]), f"Non-numeric: {col}"
