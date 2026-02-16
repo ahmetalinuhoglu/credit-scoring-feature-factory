@@ -130,6 +130,17 @@ class VIFConfig(BaseModel):
     iv_aware: bool = True
 
 
+class TemporalFilterConfig(BaseModel):
+    """Time-dependent variable performance filtering configuration."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    min_quarterly_auc: float = Field(default=0.52, ge=0.50, le=1.0)
+    max_auc_degradation: float = Field(default=0.05, ge=0.0)
+    min_trend_slope: float = Field(default=-0.02)
+
+
 class StepsConfig(BaseModel):
     """All pipeline step configurations."""
 
@@ -139,6 +150,7 @@ class StepsConfig(BaseModel):
     missing: MissingConfig = Field(default_factory=MissingConfig)
     iv: IVConfig = Field(default_factory=IVConfig)
     psi: PSIConfig = Field(default_factory=PSIConfig)
+    temporal_filter: TemporalFilterConfig = Field(default_factory=TemporalFilterConfig)
     correlation: CorrelationConfig = Field(default_factory=CorrelationConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
     vif: VIFConfig = Field(default_factory=VIFConfig)
@@ -204,6 +216,24 @@ class BootstrapConfig(BaseModel):
     confidence_level: float = Field(default=0.95, ge=0.50, le=0.99)
 
 
+class SubsegmentConfig(BaseModel):
+    """Subsegment analysis configuration."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = False
+    columns: List[str] = Field(default_factory=list)  # e.g., ["applicant_type"]
+
+
+class ConfusionMatrixConfig(BaseModel):
+    """Confusion matrix configuration."""
+
+    model_config = {"frozen": True}
+
+    enabled: bool = True
+    thresholds: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5])
+
+
 class EvaluationConfig(BaseModel):
     """Model evaluation configuration."""
 
@@ -217,6 +247,8 @@ class EvaluationConfig(BaseModel):
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     shap: SHAPConfig = Field(default_factory=SHAPConfig)
     bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
+    subsegment: SubsegmentConfig = Field(default_factory=SubsegmentConfig)
+    confusion_matrix: ConfusionMatrixConfig = Field(default_factory=ConfusionMatrixConfig)
 
 
 class ValidationChecksConfig(BaseModel):
@@ -253,6 +285,7 @@ class OutputConfig(BaseModel):
     save_split_indices: bool = True
     generate_excel: bool = True
     save_correlation_matrix: bool = True
+    generate_docs: bool = True
 
 
 class ReproducibilityConfig(BaseModel):
@@ -278,5 +311,59 @@ class PipelineConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
+    reproducibility: ReproducibilityConfig = Field(default_factory=ReproducibilityConfig)
+
+
+# ===================================================================
+# Classic Model Configuration (WoE + LogReg + Scorecard)
+# ===================================================================
+
+class WoEConfig(BaseModel):
+    """Weight of Evidence binning configuration."""
+
+    model_config = {"frozen": True}
+
+    n_bins: int = Field(default=10, ge=2)
+    min_bin_size: float = Field(default=0.05, ge=0.01, le=0.5)
+    monotonic: bool = True
+    missing_bin: bool = True
+    min_iv: float = Field(default=0.02, ge=0.0)
+    max_iv: float = Field(default=0.50, ge=0.0)
+
+
+class LogisticConfig(BaseModel):
+    """Logistic regression model configuration."""
+
+    model_config = {"frozen": True}
+
+    solver: Literal["lbfgs", "liblinear", "saga"] = "lbfgs"
+    penalty: Literal["l1", "l2", "none"] = "l2"
+    C: float = Field(default=1.0, gt=0.0)
+    max_iter: int = Field(default=1000, ge=100)
+    class_weight: Optional[str] = "balanced"
+
+
+class ScorecardConfig(BaseModel):
+    """Scorecard generation configuration."""
+
+    model_config = {"frozen": True}
+
+    target_score: int = Field(default=600, ge=0)
+    target_odds: float = Field(default=20.0, gt=0.0)
+    pdo: float = Field(default=50.0, gt=0.0)
+
+
+class ClassicPipelineConfig(BaseModel):
+    """Top-level configuration for the classic credit risk model pipeline."""
+
+    model_config = {"frozen": True}
+
+    data: DataConfig = Field(default_factory=DataConfig)
+    splitting: SplittingConfig = Field(default_factory=SplittingConfig)
+    woe: WoEConfig = Field(default_factory=WoEConfig)
+    logistic: LogisticConfig = Field(default_factory=LogisticConfig)
+    scorecard: ScorecardConfig = Field(default_factory=ScorecardConfig)
+    evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     reproducibility: ReproducibilityConfig = Field(default_factory=ReproducibilityConfig)

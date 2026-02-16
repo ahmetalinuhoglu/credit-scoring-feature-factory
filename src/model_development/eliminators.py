@@ -102,7 +102,9 @@ class ConstantEliminator(BaseEliminator):
                 'Status': status,
             })
 
-        details_df = pd.DataFrame(rows).sort_values('Unique_Count')
+        details_df = pd.DataFrame(rows)
+        if not details_df.empty:
+            details_df = details_df.sort_values('Unique_Count')
         logger.info(
             f"CONSTANT | Eliminated {len(eliminated)} features "
             f"({len(kept)} remaining)"
@@ -148,9 +150,9 @@ class MissingEliminator(BaseEliminator):
                 'Status': status,
             })
 
-        details_df = pd.DataFrame(rows).sort_values(
-            'Missing_Rate', ascending=False
-        )
+        details_df = pd.DataFrame(rows)
+        if not details_df.empty:
+            details_df = details_df.sort_values('Missing_Rate', ascending=False)
         logger.info(
             f"MISSING | Eliminated {len(eliminated)} features "
             f"({len(kept)} remaining)"
@@ -311,9 +313,9 @@ class IVEliminator(BaseEliminator):
             else:
                 eliminated.append(row['Feature'])
 
-        details_df = pd.DataFrame(rows).sort_values(
-            'IV_Score', ascending=False, na_position='last'
-        )
+        details_df = pd.DataFrame(rows)
+        if not details_df.empty:
+            details_df = details_df.sort_values('IV_Score', ascending=False, na_position='last')
         logger.info(
             f"IV | Eliminated {len(eliminated)} features "
             f"({len(kept)} remaining)"
@@ -680,9 +682,9 @@ class PSIEliminator(BaseEliminator):
             else:
                 eliminated.append(row['Feature'])
 
-        details_df = pd.DataFrame(rows).sort_values(
-            'Max_PSI', ascending=False
-        )
+        details_df = pd.DataFrame(rows)
+        if not details_df.empty:
+            details_df = details_df.sort_values('Max_PSI', ascending=False)
         logger.info(
             f"PSI | Eliminated {len(eliminated)} features "
             f"({len(kept)} remaining)"
@@ -816,7 +818,7 @@ class VIFEliminator(BaseEliminator):
     is dropped first (preserving more predictive features).
     """
 
-    step_name = "07_VIF"
+    step_name = "09_VIF"
 
     def __init__(self, threshold: float = 5.0, iv_aware: bool = True):
         self.threshold = threshold
@@ -986,3 +988,212 @@ class VIFEliminator(BaseEliminator):
             self.step_name, list(current_features), eliminated_features,
             details_df
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# Temporal Performance Filter (module-level helper + eliminator)
+# ──────────────────────────────────────────────────────────────
+
+def _compute_temporal_feature_metrics(
+    feat_name: str,
+    train_feat_values: np.ndarray,
+    train_target: np.ndarray,
+    quarter_masks: List[Tuple[str, np.ndarray]],
+    oot_quarters_data: Optional[List[Tuple[str, np.ndarray, np.ndarray]]] = None,
+    min_trend_slope: float = -0.02,
+    max_auc_degradation: float = 0.05,
+) -> Dict:
+    """Compute temporal AUC trend for one feature (module-level, picklable for joblib).
+
+    For each quarter, compute univariate AUC (feature vs target).
+    Then:
+    - Compute linear regression slope on quarterly AUCs
+    - Compute mean OOT AUC
+    - Check elimination criteria
+
+    Args:
+        feat_name: Feature name.
+        train_feat_values: Feature values for training data.
+        train_target: Target values for training data.
+        quarter_masks: List of (quarter_label, boolean_mask) for training quarters.
+        oot_quarters_data: List of (label, feat_values, target_values) for OOT quarters.
+        min_trend_slope: Minimum acceptable quarterly AUC trend slope.
+        max_auc_degradation: Maximum acceptable train-to-OOT AUC drop.
+
+    Returns:
+        Dict with feature metrics and elimination decision.
+    """
+    from scipy import stats
+
+    quarterly_aucs = {}
+    for q_label, q_mask in quarter_masks:
+        q_feat = train_feat_values[q_mask]
+        q_target = train_target[q_mask]
+        # Remove NaN
+        valid = ~np.isnan(q_feat)
+        q_feat = q_feat[valid]
+        q_target = q_target[valid]
+        if len(q_feat) < 30 or len(np.unique(q_target)) < 2:
+            continue
+        try:
+            auc = roc_auc_score(q_target, q_feat)
+            # Ensure AUC >= 0.5 (flip if anti-predictive)
+            auc = max(auc, 1 - auc)
+            quarterly_aucs[q_label] = round(auc, 4)
+        except Exception:
+            pass
+
+    oot_aucs = {}
+    if oot_quarters_data:
+        for o_label, o_feat, o_target in oot_quarters_data:
+            valid = ~np.isnan(o_feat)
+            o_feat_clean = o_feat[valid]
+            o_target_clean = o_target[valid]
+            if len(o_feat_clean) < 30 or len(np.unique(o_target_clean)) < 2:
+                continue
+            try:
+                auc = roc_auc_score(o_target_clean, o_feat_clean)
+                auc = max(auc, 1 - auc)
+                oot_aucs[f'OOT_{o_label}'] = round(auc, 4)
+            except Exception:
+                pass
+
+    # Compute train avg AUC and OOT avg AUC
+    train_aucs = list(quarterly_aucs.values())
+    train_avg = float(np.mean(train_aucs)) if train_aucs else 0.5
+    oot_avg = float(np.mean(list(oot_aucs.values()))) if oot_aucs else train_avg
+
+    # Compute trend slope (linear regression on quarterly AUCs)
+    slope = 0.0
+    if len(train_aucs) >= 2:
+        x = np.arange(len(train_aucs))
+        result = stats.linregress(x, train_aucs)
+        slope = float(result.slope)
+
+    degradation = train_avg - oot_avg
+
+    # Determine elimination
+    reasons = []
+    if slope < min_trend_slope:
+        reasons.append(f"Slope {slope:.4f} < {min_trend_slope}")
+    if degradation > max_auc_degradation:
+        reasons.append(f"Degradation {degradation:.4f} > {max_auc_degradation}")
+
+    status = "Eliminated" if reasons else "Kept"
+    reason = "; ".join(reasons)
+
+    row = {
+        'Feature': feat_name,
+        'Train_Avg_AUC': round(train_avg, 4),
+        'OOT_Avg_AUC': round(oot_avg, 4),
+        'AUC_Degradation': round(degradation, 4),
+        'Quarterly_Slope': round(slope, 4),
+    }
+    # Add individual quarter AUCs
+    for q_label, auc_val in quarterly_aucs.items():
+        row[f'AUC_{q_label}'] = auc_val
+    for o_label, auc_val in oot_aucs.items():
+        row[f'AUC_{o_label}'] = auc_val
+    row['Status'] = status
+    row['Reason'] = reason
+
+    return row
+
+
+class TemporalPerformanceEliminator(BaseEliminator):
+    """Drop features whose univariate predictive power degrades over time.
+
+    Checks both training quarterly AUC trend AND OOT degradation.
+    """
+
+    step_name = "07_Temporal_Filter"
+
+    def __init__(
+        self,
+        min_quarterly_auc: float = 0.52,
+        max_auc_degradation: float = 0.05,
+        min_trend_slope: float = -0.02,
+        n_jobs: int = 1,
+    ):
+        self.min_quarterly_auc = min_quarterly_auc
+        self.max_auc_degradation = max_auc_degradation
+        self.min_trend_slope = min_trend_slope
+        self.n_jobs = n_jobs
+
+    def eliminate(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        features: List[str],
+        train_dates: pd.Series = None,
+        oot_quarters: Dict[str, pd.DataFrame] = None,
+        target_column: str = 'target',
+        **kwargs,
+    ) -> EliminationResult:
+        if train_dates is None:
+            logger.warning("TEMPORAL | No train_dates provided, skipping")
+            details_df = pd.DataFrame({
+                'Feature': features, 'Status': 'Kept', 'Reason': 'No dates provided'
+            })
+            return EliminationResult(self.step_name, list(features), [], details_df)
+
+        # Build quarter masks from training dates
+        quarters = train_dates.dt.to_period('Q')
+        quarter_masks = []
+        for q in sorted(quarters.unique()):
+            q_mask = (quarters == q).values
+            if q_mask.sum() >= 30:
+                quarter_masks.append((str(q), q_mask))
+
+        target_values = y_train.values
+
+        logger.info(
+            f"TEMPORAL | Checking {len(features)} features across "
+            f"{len(quarter_masks)} training quarters"
+        )
+
+        # Pre-extract OOT data per feature into picklable format
+        # For each feature, build list of (label, feat_values, target_values)
+        oot_data_by_feature: Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]] = {}
+        if oot_quarters:
+            for feat in features:
+                feat_oot = []
+                for label in sorted(oot_quarters.keys()):
+                    qdf = oot_quarters[label]
+                    if feat not in qdf.columns:
+                        continue
+                    feat_oot.append((
+                        label,
+                        qdf[feat].values,
+                        qdf[target_column].values,
+                    ))
+                oot_data_by_feature[feat] = feat_oot
+
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(_compute_temporal_feature_metrics)(
+                feat_name=feat,
+                train_feat_values=X_train[feat].values,
+                train_target=target_values,
+                quarter_masks=quarter_masks,
+                oot_quarters_data=oot_data_by_feature.get(feat),
+                min_trend_slope=self.min_trend_slope,
+                max_auc_degradation=self.max_auc_degradation,
+            )
+            for feat in features
+        )
+
+        rows = []
+        kept, eliminated = [], []
+        for row in results:
+            rows.append(row)
+            if row['Status'] == 'Kept':
+                kept.append(row['Feature'])
+            else:
+                eliminated.append(row['Feature'])
+
+        details_df = pd.DataFrame(rows)
+        logger.info(
+            f"TEMPORAL | Eliminated {len(eliminated)} features "
+            f"({len(kept)} remaining)"
+        )
+        return EliminationResult(self.step_name, kept, eliminated, details_df)

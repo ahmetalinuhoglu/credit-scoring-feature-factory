@@ -36,14 +36,24 @@ from src.model_development.eliminators import (
     QuarterlyPSICheck,
     CorrelationEliminator,
     VIFEliminator,
+    TemporalPerformanceEliminator,
     EliminationResult,
 )
 from src.model_development.feature_selector import sequential_feature_selection
 from src.model_development.hyperparameter_tuner import tune_hyperparameters
 from src.model_development.evaluator import (
     evaluate_model_quarterly,
+    evaluate_model_summary,
+    evaluate_quarterly_chronological,
+    compute_variable_quarterly_auc,
     bootstrap_auc_ci,
     compute_score_psi,
+    compute_quarterly_trend,
+    compute_confusion_metrics,
+)
+from src.model_development.subsegment_evaluator import (
+    evaluate_by_subsegment,
+    compute_confusion_by_subsegment,
 )
 from src.model_development import excel_reporter
 
@@ -257,7 +267,43 @@ class ModelDevelopmentPipeline:
         features = psi_result.kept_features
         results['after_psi'] = len(features)
 
-        # Step 5: Correlation elimination
+        # Step 5a: ALWAYS compute variable quarterly AUC (for 11b sheet)
+        variable_quarterly_df = None
+        try:
+            logger.info("VAR_AUC | Computing variable quarterly AUC for all features")
+            variable_quarterly_df = compute_variable_quarterly_auc(
+                features=features,
+                datasets=datasets,
+                target_column=self.target_column,
+                date_column=self.date_column,
+                n_jobs=self.n_jobs,
+            )
+        except Exception as e:
+            logger.warning("VAR_AUC | Variable quarterly AUC failed: %s", e)
+
+        # Step 5b: Temporal performance filter (enabled by default)
+        temporal_cfg = self.config.steps.temporal_filter if self.config else None
+        if temporal_cfg and temporal_cfg.enabled:
+            logger.info("TEMPORAL | Running temporal performance filter")
+            temporal_elim = TemporalPerformanceEliminator(
+                min_quarterly_auc=temporal_cfg.min_quarterly_auc,
+                max_auc_degradation=temporal_cfg.max_auc_degradation,
+                min_trend_slope=temporal_cfg.min_trend_slope,
+                n_jobs=self.n_jobs,
+            )
+            temporal_result = temporal_elim.eliminate(
+                X_train, y_train, features,
+                train_dates=datasets.train[self.date_column],
+                oot_quarters=datasets.oot_quarters,
+                target_column=self.target_column,
+            )
+            elimination_results.append(temporal_result)
+            features = temporal_result.kept_features
+            results['after_temporal'] = len(features)
+        else:
+            results['after_temporal'] = len(features)
+
+        # Step 6: Correlation elimination
         corr_elim = CorrelationEliminator(
             max_correlation=self.correlation_threshold
         )
@@ -269,7 +315,7 @@ class ModelDevelopmentPipeline:
         results['after_correlation'] = len(features)
         corr_pairs_df = getattr(corr_elim, 'corr_pairs_df', None)
 
-        # Step 6: Sequential feature selection (CV-based)
+        # Step 7: Sequential feature selection (CV-based)
         logger.info(
             f"SELECTION | Starting {self.selection_method} selection "
             f"with {len(features)} features"
@@ -299,7 +345,7 @@ class ModelDevelopmentPipeline:
         results['selected_features'] = selected_features
         results['chart_path'] = chart_path
 
-        # Step 7: VIF check (post-selection, when few features remain)
+        # Step 8: VIF check (post-selection, when few features remain)
         vif_result = None
         if self.vif_enabled and len(selected_features) > 2:
             logger.info(
@@ -321,7 +367,7 @@ class ModelDevelopmentPipeline:
             results['after_vif'] = len(selected_features)
             logger.info("VIF | Skipped (disabled or too few features)")
 
-        # Step 8: Hyperparameter tuning
+        # Step 9: Hyperparameter tuning
         tuning_df = None
         best_params = None
         if self.tuning_enabled:
@@ -351,7 +397,7 @@ class ModelDevelopmentPipeline:
                 X_test[selected_features], y_test,
             )
 
-        # Step 9: Quarterly evaluation
+        # Step 10: Quarterly evaluation
         eval_cfg = self.config.evaluation if self.config else None
         importance_type = eval_cfg.importance_type if eval_cfg else 'gain'
 
@@ -366,8 +412,34 @@ class ModelDevelopmentPipeline:
             importance_type=importance_type,
         )
 
-        # Extract key metrics for summary
-        for _, row in performance_df.iterrows():
+        # NEW: 3-row summary for Excel 11_Performance
+        logger.info("EVAL | Computing 3-row summary (Train, Test, OOT)")
+        summary_perf_df, summary_lift_tables, importance_df = evaluate_model_summary(
+            model=final_model,
+            selected_features=selected_features,
+            train_df=datasets.train,
+            test_df=datasets.test,
+            oot_quarters=datasets.oot_quarters,
+            target_column=self.target_column,
+            importance_type=importance_type,
+        )
+
+        # NEW: Chronological quarterly for Excel 11a_Quarterly_Perf
+        quarterly_perf_df = None
+        try:
+            logger.info("EVAL | Computing chronological quarterly performance")
+            quarterly_perf_df = evaluate_quarterly_chronological(
+                model=final_model,
+                selected_features=selected_features,
+                datasets=datasets,
+                target_column=self.target_column,
+                date_column=self.date_column,
+            )
+        except Exception as e:
+            logger.warning("EVAL | Quarterly chronological failed: %s", e)
+
+        # Extract key metrics from summary (Train, Test, OOT)
+        for _, row in summary_perf_df.iterrows():
             period = row['Period']
             results[f'AUC_{period}'] = row['AUC']
             results[f'Gini_{period}'] = row['Gini']
@@ -400,15 +472,19 @@ class ModelDevelopmentPipeline:
             except Exception as e:
                 logger.warning("EVAL | Score PSI failed: %s", e)
 
-        # Step 9b: Bootstrap CI
+        # Step 9b: Bootstrap CI (on 3-row summary: Train, Test, OOT combined)
         if eval_cfg and eval_cfg.bootstrap.enabled:
             logger.info("EVAL | Computing bootstrap AUC confidence intervals")
             try:
-                periods_for_bootstrap = [('Train', datasets.train), ('Test', datasets.test)]
-                for label in sorted(datasets.oot_quarters.keys()):
-                    periods_for_bootstrap.append(
-                        (f'OOT_{label}', datasets.oot_quarters[label])
-                    )
+                oot_combined = pd.concat(
+                    list(datasets.oot_quarters.values()), ignore_index=True
+                ) if datasets.oot_quarters else pd.DataFrame()
+                periods_for_bootstrap = [
+                    ('Train', datasets.train),
+                    ('Test', datasets.test),
+                ]
+                if len(oot_combined) > 0:
+                    periods_for_bootstrap.append(('OOT', oot_combined))
                 bootstrap_df = bootstrap_auc_ci(
                     model=final_model,
                     selected_features=selected_features,
@@ -418,10 +494,10 @@ class ModelDevelopmentPipeline:
                     confidence_level=eval_cfg.bootstrap.confidence_level,
                     n_jobs=self.n_jobs,
                 )
-                # Merge CI columns into performance_df
+                # Merge CI columns into summary_perf_df (3 rows)
                 if bootstrap_df is not None and not bootstrap_df.empty:
                     ci_cols = bootstrap_df[['Period', 'CI_Lower', 'CI_Upper']].copy()
-                    performance_df = performance_df.merge(ci_cols, on='Period', how='left')
+                    summary_perf_df = summary_perf_df.merge(ci_cols, on='Period', how='left')
                 results['bootstrap_df'] = bootstrap_df
                 logger.info("EVAL | Bootstrap CI computed")
             except Exception as e:
@@ -479,7 +555,71 @@ class ModelDevelopmentPipeline:
             except Exception as e:
                 logger.warning("EVAL | SHAP analysis failed: %s", e)
 
-        # Step 9e: Validation
+        # Step 9e: Quarterly trend
+        quarterly_trend_df = None
+        try:
+            quarterly_trend_df = compute_quarterly_trend(performance_df)
+            if quarterly_trend_df is not None and len(quarterly_trend_df) > 0:
+                results['quarterly_trend_df'] = quarterly_trend_df
+                logger.info("EVAL | Quarterly trend computed for %d OOT periods", len(quarterly_trend_df))
+        except Exception as e:
+            logger.warning("EVAL | Quarterly trend failed: %s", e)
+
+        # Step 9f: Confusion matrix
+        confusion_matrix_df = None
+        if eval_cfg and eval_cfg.confusion_matrix.enabled:
+            logger.info("EVAL | Computing confusion matrix at multiple thresholds")
+            try:
+                # Use test set for overall confusion matrix
+                test_probs_cm = final_model.predict_proba(
+                    datasets.test[selected_features]
+                )[:, 1]
+                confusion_matrix_df = compute_confusion_metrics(
+                    datasets.test[self.target_column].values,
+                    test_probs_cm,
+                    thresholds=eval_cfg.confusion_matrix.thresholds,
+                )
+                results['confusion_matrix_df'] = confusion_matrix_df
+                logger.info("EVAL | Confusion matrix computed at %d thresholds",
+                            len(eval_cfg.confusion_matrix.thresholds))
+            except Exception as e:
+                logger.warning("EVAL | Confusion matrix failed: %s", e)
+
+        # Step 9g: Subsegment analysis
+        subsegment_perf = None
+        subsegment_confusion = None
+        if eval_cfg and eval_cfg.subsegment.enabled and eval_cfg.subsegment.columns:
+            logger.info("EVAL | Running subsegment analysis for columns: %s",
+                        eval_cfg.subsegment.columns)
+            try:
+                subsegment_perf = evaluate_by_subsegment(
+                    model=final_model,
+                    datasets=datasets,
+                    selected_features=selected_features,
+                    subsegment_columns=eval_cfg.subsegment.columns,
+                    target_column=self.target_column,
+                )
+                results['subsegment_perf'] = subsegment_perf
+                logger.info("EVAL | Subsegment performance computed")
+            except Exception as e:
+                logger.warning("EVAL | Subsegment performance failed: %s", e)
+
+            if eval_cfg.confusion_matrix.enabled:
+                try:
+                    subsegment_confusion = compute_confusion_by_subsegment(
+                        model=final_model,
+                        datasets=datasets,
+                        selected_features=selected_features,
+                        subsegment_columns=eval_cfg.subsegment.columns,
+                        target_column=self.target_column,
+                        thresholds=eval_cfg.confusion_matrix.thresholds,
+                    )
+                    results['subsegment_confusion'] = subsegment_confusion
+                    logger.info("EVAL | Subsegment confusion matrices computed")
+                except Exception as e:
+                    logger.warning("EVAL | Subsegment confusion failed: %s", e)
+
+        # Step 9i: Validation
         if self.config and self.config.validation.enabled:
             logger.info("EVAL | Running model validation checks")
             try:
@@ -498,7 +638,7 @@ class ModelDevelopmentPipeline:
             except Exception as e:
                 logger.warning("EVAL | Validation failed: %s", e)
 
-        # Step 9f: Save model artifact
+        # Step 9j: Save model artifact
         if self.output_manager and self.config and self.config.output.save_model:
             logger.info("EVAL | Saving model artifact")
             try:
@@ -510,7 +650,7 @@ class ModelDevelopmentPipeline:
             except Exception as e:
                 logger.warning("EVAL | Model save failed: %s", e)
 
-        # Step 10: Generate Excel report
+        # Step 11: Generate Excel report
         excel_path = str(
             self.output_dir / f'model_dev_{self.run_id}.xlsx'
         )
@@ -524,8 +664,8 @@ class ModelDevelopmentPipeline:
             elimination_results=elimination_results,
             corr_pairs_df=corr_pairs_df,
             selection_df=selection_df,
-            performance_df=performance_df,
-            lift_tables=lift_tables,
+            performance_df=summary_perf_df,
+            lift_tables=summary_lift_tables,
             importance_df=importance_df,
             vif_df=vif_result.details_df if vif_result else None,
             tuning_df=tuning_df,
@@ -537,6 +677,11 @@ class ModelDevelopmentPipeline:
             shap_plot_path=shap_plot_paths[0] if shap_plot_paths else None,
             calibration_dict=calibration_dict,
             validation_report_df=validation_report_df,
+            quarterly_perf_df=quarterly_perf_df,
+            variable_quarterly_df=variable_quarterly_df,
+            confusion_matrix_df=confusion_matrix_df,
+            subsegment_perf=subsegment_perf,
+            subsegment_confusion=subsegment_confusion,
         )
 
         results['excel_path'] = excel_path
@@ -631,9 +776,13 @@ class ModelDevelopmentPipeline:
                 f"{results['after_psi']} "
                 f"({results['after_iv'] - results['after_psi']} eliminated)"
             ),
+            'After Temporal Filter': (
+                f"{results['after_temporal']} "
+                f"({results['after_psi'] - results['after_temporal']} eliminated)"
+            ),
             'After Correlation Elimination': (
                 f"{results['after_correlation']} "
-                f"({results['after_psi'] - results['after_correlation']} eliminated)"
+                f"({results['after_temporal'] - results['after_correlation']} eliminated)"
             ),
             'After Sequential Selection': (
                 f"{results['after_selection']} "

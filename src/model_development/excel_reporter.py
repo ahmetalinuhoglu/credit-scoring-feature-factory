@@ -31,6 +31,35 @@ THIN_BORDER = Border(
     top=Side(style='thin'), bottom=Side(style='thin'),
 )
 
+# Centralized sheet name mapping (clean sequential numbering)
+SHEET_NAMES = {
+    'summary': '00_Summary',
+    'constant': '01_Constant',
+    'missing': '02_Missing',
+    'iv': '03_IV_Analysis',
+    'psi': '04_PSI_Stability',
+    'correlation': '05_Correlation',
+    'corr_pairs': '06_Corr_Pairs',
+    'temporal_filter': '07_Temporal_Filter',
+    'selection': '08_Selection',
+    'vif': '09_VIF',
+    'tuning': '10_Tuning',
+    'tuning_best': '10a_Tuning_Best',
+    'performance': '11_Performance',
+    'quarterly_performance': '11a_Quarterly_Perf',
+    'variable_quarterly': '11b_Var_Quarterly_AUC',
+    'lift_tables': '12_Lift_Tables',
+    'importance': '13_Importance',
+    'confusion_matrix': '14_Confusion_Matrix',
+    'score_psi': '15_Score_PSI',
+    'bootstrap_ci': '16_Bootstrap_CI',
+    'shap': '17_SHAP',
+    'calibration': '18_Calibration',
+    'subseg_perf': '19_Subseg_Perf',
+    'subseg_confusion': '20_Subseg_Confusion',
+    'validation': '21_Validation',
+}
+
 
 def generate_report(
     output_path: str,
@@ -51,6 +80,12 @@ def generate_report(
     shap_plot_path: Optional[str] = None,
     calibration_dict: Optional[Dict[str, Any]] = None,
     validation_report_df: Optional[pd.DataFrame] = None,
+    # NEW parameters
+    quarterly_perf_df: Optional[pd.DataFrame] = None,
+    variable_quarterly_df: Optional[pd.DataFrame] = None,
+    confusion_matrix_df: Optional[pd.DataFrame] = None,
+    subsegment_perf: Optional[Dict[str, pd.DataFrame]] = None,
+    subsegment_confusion: Optional[Dict[str, pd.DataFrame]] = None,
 ) -> str:
     """
     Generate the full Excel report.
@@ -68,6 +103,17 @@ def generate_report(
         tuning_df: Optuna trial history DataFrame (optional).
         tuning_best_params: Best hyperparameters dict (optional).
         chart_path: Path to selection performance chart PNG (optional).
+        score_psi_df: Score PSI DataFrame (optional).
+        bootstrap_df: Bootstrap CI DataFrame (optional).
+        shap_summary_df: SHAP summary DataFrame (optional).
+        shap_plot_path: Path to SHAP plot PNG (optional).
+        calibration_dict: Calibration results dict (optional).
+        validation_report_df: Validation report DataFrame (optional).
+        quarterly_perf_df: Quarterly performance DataFrame (optional).
+        variable_quarterly_df: Per-variable quarterly AUC DataFrame (optional).
+        confusion_matrix_df: Confusion matrix DataFrame (optional).
+        subsegment_perf: Dict of subsegment -> performance DataFrame (optional).
+        subsegment_confusion: Dict of subsegment -> confusion matrix DataFrame (optional).
 
     Returns:
         Path to the generated Excel file.
@@ -77,64 +123,111 @@ def generate_report(
     # 00_Summary
     _write_summary_sheet(wb, summary)
 
-    # Elimination sheets (01-05, possibly 07_VIF)
+    # Elimination sheets (01-05, 07_Temporal_Filter, 09_VIF via step_name)
     for result in elimination_results:
         _write_df_sheet(wb, result.step_name, result.details_df)
 
-    # 05_Correlation_Matrix
+    # 06_Corr_Pairs
     if corr_pairs_df is not None and len(corr_pairs_df) > 0:
-        _write_df_sheet(wb, "05_Corr_Pairs", corr_pairs_df)
+        _write_df_sheet(wb, SHEET_NAMES['corr_pairs'], corr_pairs_df)
 
-    # 06_Sequential_Selection
-    _write_selection_sheet(wb, "06_Selection", selection_df, chart_path)
+    # 08_Selection
+    _write_selection_sheet(wb, SHEET_NAMES['selection'], selection_df, chart_path)
 
-    # 07_VIF (if not already added via elimination_results)
+    # 09_VIF (if not already added via elimination_results)
     vif_already_added = any(
-        r.step_name == "07_VIF" for r in elimination_results
+        r.step_name == SHEET_NAMES['vif'] for r in elimination_results
     )
     if vif_df is not None and not vif_already_added:
-        _write_df_sheet(wb, "07_VIF", vif_df)
+        _write_df_sheet(wb, SHEET_NAMES['vif'], vif_df)
 
-    # 08_Tuning
+    # 10_Tuning
     if tuning_df is not None:
-        _write_df_sheet(wb, "08_Tuning", tuning_df)
+        _write_df_sheet(wb, SHEET_NAMES['tuning'], tuning_df)
 
-    # 08_Tuning_Best
+    # 10a_Tuning_Best
     if tuning_best_params is not None:
         _write_best_params_sheet(wb, tuning_best_params)
 
-    # 09_Model_Performance
-    _write_df_sheet(wb, "09_Performance", performance_df)
+    # 11_Performance
+    _write_df_sheet(wb, SHEET_NAMES['performance'], performance_df)
 
-    # 09_Lift_Tables (one sheet per period, or combined)
+    # 11a_Quarterly_Perf
+    if quarterly_perf_df is not None and len(quarterly_perf_df) > 0:
+        _write_df_sheet(wb, SHEET_NAMES['quarterly_performance'], quarterly_perf_df)
+
+    # 11b_Var_Quarterly_AUC
+    if variable_quarterly_df is not None and len(variable_quarterly_df) > 0:
+        _write_df_sheet(wb, SHEET_NAMES['variable_quarterly'], variable_quarterly_df)
+
+    # 12_Lift_Tables (one sheet per period, or combined)
     _write_lift_sheets(wb, lift_tables)
 
-    # 09_Feature_Importance
-    _write_df_sheet(wb, "09_Importance", importance_df)
+    # 13_Importance
+    _write_df_sheet(wb, SHEET_NAMES['importance'], importance_df)
 
-    # 10_Score_PSI
+    # 14_Confusion_Matrix
+    if confusion_matrix_df is not None and len(confusion_matrix_df) > 0:
+        _write_df_sheet(wb, SHEET_NAMES['confusion_matrix'], confusion_matrix_df)
+
+    # 15_Score_PSI
     if score_psi_df is not None and len(score_psi_df) > 0:
-        _write_df_sheet(wb, "10_Score_PSI", score_psi_df)
+        _write_df_sheet(wb, SHEET_NAMES['score_psi'], score_psi_df)
 
-    # 10_Bootstrap_CI
+    # 16_Bootstrap_CI
     if bootstrap_df is not None and len(bootstrap_df) > 0:
-        _write_df_sheet(wb, "10_Bootstrap_CI", bootstrap_df)
+        _write_df_sheet(wb, SHEET_NAMES['bootstrap_ci'], bootstrap_df)
 
-    # 10_SHAP
+    # 17_SHAP
     if shap_summary_df is not None and len(shap_summary_df) > 0:
-        _write_shap_sheet(wb, "10_SHAP", shap_summary_df, shap_plot_path)
+        _write_shap_sheet(wb, SHEET_NAMES['shap'], shap_summary_df, shap_plot_path)
 
-    # 10_Calibration
+    # 18_Calibration
     if calibration_dict is not None:
-        _write_best_params_sheet_named(wb, "10_Calibration", calibration_dict)
+        _write_best_params_sheet_named(wb, SHEET_NAMES['calibration'], calibration_dict)
 
-    # 10_Validation
+    # 19_Subseg_Perf
+    if subsegment_perf:
+        combined_rows = []
+        for seg_col, seg_df in subsegment_perf.items():
+            seg_copy = seg_df.copy()
+            if 'Subsegment_Column' not in seg_copy.columns:
+                seg_copy.insert(0, 'Subsegment_Column', seg_col)
+            combined_rows.append(seg_copy)
+        if combined_rows:
+            combined = pd.concat(combined_rows, ignore_index=True)
+            _write_df_sheet(wb, SHEET_NAMES['subseg_perf'], combined)
+
+    # 20_Subseg_Confusion
+    if subsegment_confusion:
+        combined_rows = []
+        for seg_col, seg_df in subsegment_confusion.items():
+            seg_copy = seg_df.copy()
+            if 'Subsegment_Column' not in seg_copy.columns:
+                seg_copy.insert(0, 'Subsegment_Column', seg_col)
+            combined_rows.append(seg_copy)
+        if combined_rows:
+            combined = pd.concat(combined_rows, ignore_index=True)
+            _write_df_sheet(wb, SHEET_NAMES['subseg_confusion'], combined)
+
+    # 21_Validation
     if validation_report_df is not None and len(validation_report_df) > 0:
-        _write_validation_sheet(wb, "10_Validation", validation_report_df)
+        _write_validation_sheet(wb, SHEET_NAMES['validation'], validation_report_df)
 
     # Remove default empty sheet if exists
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
+
+    # Reorder sheets by their numerical prefix (e.g., 00, 01, ..., 10a, 10b, 11, 11a, 11b)
+    def _sheet_sort_key(name):
+        prefix = name.split('_')[0]
+        # Extract numeric part and optional letter suffix
+        num = ''.join(c for c in prefix if c.isdigit())
+        suffix = ''.join(c for c in prefix if c.isalpha())
+        return (int(num) if num else 0, suffix or '', name)
+
+    sheet_order = sorted(wb.sheetnames, key=_sheet_sort_key)
+    wb._sheets = [wb[name] for name in sheet_order]
 
     # Save
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -243,8 +336,8 @@ def _write_selection_sheet(
 def _write_best_params_sheet(
     wb: Workbook, best_params: Dict[str, Any]
 ) -> None:
-    """Write the 08_Tuning_Best sheet with best hyperparameters."""
-    ws = wb.create_sheet("08_Tuning_Best")
+    """Write the tuning best params sheet with best hyperparameters."""
+    ws = wb.create_sheet(SHEET_NAMES['tuning_best'])
 
     ws.column_dimensions['A'].width = 30
     ws.column_dimensions['B'].width = 25
@@ -358,7 +451,7 @@ def _write_lift_sheets(
 
     if combined_rows:
         combined = pd.concat(combined_rows, ignore_index=True)
-        _write_df_sheet(wb, "09_Lift_Tables", combined)
+        _write_df_sheet(wb, SHEET_NAMES['lift_tables'], combined)
 
 
 # Styles for validation

@@ -484,24 +484,35 @@ class WoETransformer(PandasComponent):
     
     def _apply_woe(self, series: pd.Series, binning: WoEFeatureResult) -> pd.Series:
         """Apply WoE encoding to a series."""
-        result = pd.Series(index=series.index, dtype=float)
-        
+        # Default to 0.0 (neutral WoE) for values outside known bins
+        result = pd.Series(0.0, index=series.index, dtype=float)
+
         # Get sorted bins (excluding missing)
         regular_bins = sorted(
             [b for b in binning.bins if b.bin_id >= 0],
             key=lambda x: x.lower_bound
         )
         missing_bin = next((b for b in binning.bins if b.bin_id < 0), None)
-        
+
         # Handle missing values
         if missing_bin:
             result[series.isna()] = missing_bin.woe
-        
+        else:
+            result[series.isna()] = 0.0
+
         # Apply bins to non-missing values
         for bin_obj in regular_bins:
             mask = (series >= bin_obj.lower_bound) & (series <= bin_obj.upper_bound)
             result[mask] = bin_obj.woe
-        
+
+        # Values below min bin get the lowest bin's WoE
+        if regular_bins:
+            below_mask = (~series.isna()) & (series < regular_bins[0].lower_bound)
+            result[below_mask] = regular_bins[0].woe
+            # Values above max bin get the highest bin's WoE
+            above_mask = (~series.isna()) & (series > regular_bins[-1].upper_bound)
+            result[above_mask] = regular_bins[-1].woe
+
         return result
     
     def fit_transform(

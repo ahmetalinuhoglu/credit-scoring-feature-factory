@@ -1,0 +1,152 @@
+# Model Development Run Report
+
+**Run ID:** {{ run_id }}
+**Date:** {{ run_date }}
+**Status:** {{ status }}
+
+---
+
+## 1. Executive Summary
+
+| Metric | Value |
+|--------|-------|
+| Status | {{ status }} |
+| Run Date | {{ run_date }} |
+| Input File | {{ input_path }} |
+| Total Features | {{ total_features }} |
+| Selected Features | {{ after_selection }} |
+| Final Features (after VIF) | {{ after_vif }} |
+{% if auc_train is not none %}| Train AUC | {{ "%.4f"|format(auc_train) }} |
+{% endif %}{% if auc_test is not none %}| Test AUC | {{ "%.4f"|format(auc_test) }} |
+{% endif %}{% if gini_train is not none %}| Train Gini | {{ "%.4f"|format(gini_train) }} |
+{% endif %}{% if gini_test is not none %}| Test Gini | {{ "%.4f"|format(gini_test) }} |
+{% endif %}{% if has_critical_failures is not none %}| Validation Failures | {{ "Yes -- CRITICAL" if has_critical_failures else "None" }} |
+{% endif %}
+{% if tuning_enabled %}
+**Tuning:** {{ tuning_n_trials }} Optuna trials completed.
+{% else %}
+**Tuning:** Disabled (default parameters used).
+{% endif %}
+
+---
+
+## 2. Data Description
+
+| Property | Value |
+|----------|-------|
+| Input File | `{{ input_path }}` |
+| Train End Date | {{ train_end_date }} |
+{% if train_period %}| Train Period | {{ train_period }} |
+{% endif %}{% if train_rows is not none %}| Train Rows | {{ train_rows }} |
+{% endif %}{% if test_rows is not none %}| Test Rows | {{ test_rows }} |
+{% endif %}{% if train_bad_rate %}| Train Bad Rate | {{ train_bad_rate }} |
+{% endif %}{% if test_bad_rate %}| Test Bad Rate | {{ test_bad_rate }} |
+{% endif %}{% if oot_periods %}| OOT Periods | {{ oot_periods }} |
+{% endif %}
+
+---
+
+## 3. Variable Elimination Funnel
+
+| Step | Features Remaining | Eliminated |
+|------|--------------------|------------|
+| Initial | {{ total_features }} | -- |
+{% if after_constant is not none %}| Constant Elimination | {{ after_constant }} | {{ total_features - after_constant }} |
+{% endif %}{% if after_missing is not none %}| Missing Elimination | {{ after_missing }} | {{ after_constant - after_missing }} |
+{% endif %}{% if after_iv is not none %}| IV Elimination | {{ after_iv }} | {{ after_missing - after_iv }} |
+{% endif %}{% if after_psi is not none %}| PSI Elimination | {{ after_psi }} | {{ after_iv - after_psi }} |
+{% endif %}{% if after_temporal is not none %}| Temporal Filter | {{ after_temporal }} | {{ after_psi - after_temporal }} |
+{% endif %}{% if after_correlation is not none %}| Correlation Elimination | {{ after_correlation }} | {{ (after_temporal if after_temporal is not none else after_psi) - after_correlation }} |
+{% endif %}{% if after_selection is not none %}| Sequential Selection | {{ after_selection }} | {{ after_correlation - after_selection }} |
+{% endif %}{% if after_vif is not none %}| VIF Check | {{ after_vif }} | {{ after_selection - after_vif }} |
+{% endif %}
+
+---
+
+## 4. Selected Variables
+
+{% if selected_features %}
+| # | Feature | IV Score |
+|---|---------|----------|
+{% for feat in selected_features %}| {{ loop.index }} | `{{ feat.name }}` | {{ "%.4f"|format(feat.iv) if feat.iv is not none else "N/A" }} |
+{% endfor %}
+{% else %}
+No feature details available.
+{% endif %}
+
+---
+
+## 5. Model Performance
+
+{% if performance_rows %}
+| Period | AUC | Gini | KS | Samples | Bads |
+|--------|-----|------|----|---------|------|
+{% for row in performance_rows %}| {{ row.period }} | {{ "%.4f"|format(row.auc) if row.auc is not none else "N/A" }} | {{ "%.4f"|format(row.gini) if row.gini is not none else "N/A" }} | {{ "%.4f"|format(row.ks) if row.ks is not none else "N/A" }} | {{ row.samples if row.samples is not none else "N/A" }} | {{ row.bads if row.bads is not none else "N/A" }} |
+{% endfor %}
+{% else %}
+| Period | AUC | Gini |
+|--------|-----|------|
+{% if auc_train is not none %}| Train | {{ "%.4f"|format(auc_train) }} | {{ "%.4f"|format(gini_train) if gini_train is not none else "N/A" }} |
+{% endif %}{% if auc_test is not none %}| Test | {{ "%.4f"|format(auc_test) }} | {{ "%.4f"|format(gini_test) if gini_test is not none else "N/A" }} |
+{% endif %}{% for key, value in oot_metrics.items() %}| {{ key }} | {{ "%.4f"|format(value.auc) if value.auc is not none else "N/A" }} | {{ "%.4f"|format(value.gini) if value.gini is not none else "N/A" }} |
+{% endfor %}
+{% endif %}
+
+---
+
+## 6. Quarterly Trend
+
+{% if quarterly_trend_rows %}
+| Period | AUC | AUC Change | Gini | Gini Change |
+|--------|-----|------------|------|-------------|
+{% for row in quarterly_trend_rows %}| {{ row.period }} | {{ "%.4f"|format(row.auc) if row.auc is not none else "N/A" }} | {{ "%+.4f"|format(row.auc_change) if row.auc_change is not none else "--" }} | {{ "%.4f"|format(row.gini) if row.gini is not none else "N/A" }} | {{ "%+.4f"|format(row.gini_change) if row.gini_change is not none else "--" }} |
+{% endfor %}
+{% else %}
+No quarterly trend data available.
+{% endif %}
+
+---
+
+## 7. Validation Results
+
+{% if has_critical_failures is not none %}
+**Overall Status:** {{ "FAILED -- Critical issues detected" if has_critical_failures else "PASSED -- No critical failures" }}
+
+{% if validation_checks %}
+| Check | Severity | Result | Details |
+|-------|----------|--------|---------|
+{% for check in validation_checks %}| {{ check.name }} | {{ check.severity }} | {{ check.result }} | {{ check.details }} |
+{% endfor %}
+{% endif %}
+{% else %}
+Validation was not executed for this run.
+{% endif %}
+
+---
+
+## 8. Configuration Summary
+
+{% if config_settings %}
+| Section | Parameter | Value |
+|---------|-----------|-------|
+{% for item in config_settings %}| {{ item.section }} | {{ item.param }} | {{ item.value }} |
+{% endfor %}
+{% else %}
+No configuration details available.
+{% endif %}
+
+---
+
+## Artifacts
+
+| Artifact | Path |
+|----------|------|
+{% if excel_path %}| Excel Report | `{{ excel_path }}` |
+{% endif %}{% if log_file %}| Log File | `{{ log_file }}` |
+{% endif %}{% if chart_path %}| Selection Chart | `{{ chart_path }}` |
+{% endif %}{% if model_path %}| Model Artifact | `{{ model_path }}` |
+{% endif %}
+
+---
+
+*Generated by MarkdownReportGenerator*

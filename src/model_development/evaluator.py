@@ -65,7 +65,7 @@ def evaluate_model_quarterly(
             continue
 
         y_prob = model.predict_proba(X)[:, 1]
-        metrics = _calculate_metrics(y, y_prob)
+        metrics = calculate_metrics(y, y_prob)
         lift_table = _create_lift_table(y, y_prob)
         lift_tables[period_name] = lift_table
 
@@ -97,7 +97,7 @@ def evaluate_model_quarterly(
     return performance_df, lift_tables, importance_df
 
 
-def _calculate_metrics(
+def calculate_metrics(
     y_true: np.ndarray, y_score: np.ndarray
 ) -> Dict[str, float]:
     """Calculate AUC, Gini, KS."""
@@ -339,6 +339,109 @@ def compute_score_psi(
     return pd.DataFrame(rows)
 
 
+def compute_quarterly_trend(performance_df: pd.DataFrame) -> pd.DataFrame:
+    """Extract OOT rows from performance_df and compute trend metrics.
+
+    Args:
+        performance_df: DataFrame from evaluate_model_quarterly() with columns:
+            Period, N_Samples, N_Bads, Bad_Rate, AUC, Gini, KS, ...
+
+    Returns:
+        DataFrame with columns: Period, AUC, Gini, KS, Delta_AUC, AUC_vs_Train, Trend
+
+    Logic:
+        - Filter to OOT rows (Period starts with 'OOT_')
+        - Get Train AUC from performance_df
+        - Delta_AUC = current quarter AUC - previous quarter AUC (NaN for first)
+        - AUC_vs_Train = Train_AUC - current_AUC (degradation from train)
+        - Trend = 'Improving' if Delta_AUC > 0.01, 'Degrading' if Delta_AUC < -0.01, else 'Stable'
+    """
+    train_row = performance_df[performance_df['Period'] == 'Train']
+    train_auc = float(train_row['AUC'].iloc[0]) if len(train_row) > 0 else None
+
+    oot_df = performance_df[performance_df['Period'].str.startswith('OOT_')].copy()
+    oot_df = oot_df.sort_values('Period').reset_index(drop=True)
+
+    if len(oot_df) == 0:
+        return pd.DataFrame(columns=['Period', 'AUC', 'Gini', 'KS', 'Delta_AUC', 'AUC_vs_Train', 'Trend'])
+
+    oot_df['Delta_AUC'] = oot_df['AUC'].diff()
+
+    if train_auc is not None:
+        oot_df['AUC_vs_Train'] = train_auc - oot_df['AUC']
+    else:
+        oot_df['AUC_vs_Train'] = np.nan
+
+    def _trend(delta):
+        if pd.isna(delta):
+            return 'Stable'
+        if delta > 0.01:
+            return 'Improving'
+        if delta < -0.01:
+            return 'Degrading'
+        return 'Stable'
+
+    oot_df['Trend'] = oot_df['Delta_AUC'].apply(_trend)
+
+    return oot_df[['Period', 'AUC', 'Gini', 'KS', 'Delta_AUC', 'AUC_vs_Train', 'Trend']].reset_index(drop=True)
+
+
+def compute_confusion_metrics(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    thresholds: List[float] = None,
+) -> pd.DataFrame:
+    """Compute confusion matrix metrics at multiple thresholds.
+
+    Args:
+        y_true: True binary labels (0/1)
+        y_prob: Predicted probabilities
+        thresholds: List of probability thresholds (default: [0.1, 0.2, 0.3, 0.4, 0.5])
+
+    Returns:
+        DataFrame with columns: Threshold, TP, FP, TN, FN,
+            Precision, Recall, F1, Type_I_Error, Type_II_Error, Accuracy
+    """
+    if thresholds is None:
+        thresholds = [0.1, 0.2, 0.3, 0.4, 0.5]
+
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+
+    rows = []
+    for t in thresholds:
+        y_pred = (y_prob >= t).astype(int)
+
+        tp = int(((y_pred == 1) & (y_true == 1)).sum())
+        fp = int(((y_pred == 1) & (y_true == 0)).sum())
+        tn = int(((y_pred == 0) & (y_true == 0)).sum())
+        fn = int(((y_pred == 0) & (y_true == 1)).sum())
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        type_i_error = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+        type_ii_error = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+        total = tp + fp + tn + fn
+        accuracy = (tp + tn) / total if total > 0 else 0.0
+
+        rows.append({
+            'Threshold': t,
+            'TP': tp,
+            'FP': fp,
+            'TN': tn,
+            'FN': fn,
+            'Precision': round(precision, 4),
+            'Recall': round(recall, 4),
+            'F1': round(f1, 4),
+            'Type_I_Error': round(type_i_error, 4),
+            'Type_II_Error': round(type_ii_error, 4),
+            'Accuracy': round(accuracy, 4),
+        })
+
+    return pd.DataFrame(rows)
+
+
 def _calculate_score_psi(
     expected: np.ndarray, actual: np.ndarray, n_bins: int = 10
 ) -> Optional[float]:
@@ -398,3 +501,244 @@ def _feature_importance(
     df['Rank'] = range(1, len(df) + 1)
     df['Cumulative_Importance'] = df['Importance'].cumsum()
     return df.reset_index(drop=True)
+
+
+def evaluate_model_summary(
+    model: xgb.XGBClassifier,
+    selected_features: List[str],
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    oot_quarters: Dict[str, pd.DataFrame],
+    target_column: str = 'target',
+    importance_type: str = 'gain',
+) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame], pd.DataFrame]:
+    """
+    Evaluate model with 3 summary rows: Train, Test, OOT (all quarters combined).
+
+    Args:
+        model: Trained XGBoost model.
+        selected_features: List of features used in the model.
+        train_df: Training DataFrame.
+        test_df: Test DataFrame.
+        oot_quarters: Dict mapping quarter labels to DataFrames.
+        target_column: Name of the target column.
+        importance_type: Feature importance type (gain, weight, cover).
+
+    Returns:
+        Tuple of:
+        - summary_perf_df: Performance table with 3 rows (Train, Test, OOT)
+        - lift_tables: Dict mapping period name to its lift table
+        - importance_df: Feature importance DataFrame
+    """
+    oot_combined = pd.concat(list(oot_quarters.values()), ignore_index=True) if oot_quarters else pd.DataFrame()
+
+    periods = [('Train', train_df), ('Test', test_df), ('OOT', oot_combined)]
+
+    perf_rows = []
+    lift_tables = {}
+
+    for period_name, df in periods:
+        if len(df) == 0:
+            continue
+
+        X = df[selected_features]
+        y = df[target_column].values
+
+        if len(np.unique(y)) < 2:
+            logger.warning(
+                f"Summary | {period_name}: only one class present, skipping"
+            )
+            continue
+
+        y_prob = model.predict_proba(X)[:, 1]
+        metrics = calculate_metrics(y, y_prob)
+        lift_table = _create_lift_table(y, y_prob)
+        lift_tables[period_name] = lift_table
+
+        p10, lift10 = _precision_lift_at_k(y, y_prob, k=0.10)
+
+        perf_rows.append({
+            'Period': period_name,
+            'N_Samples': len(y),
+            'N_Bads': int(y.sum()),
+            'Bad_Rate': round(y.mean(), 4),
+            'AUC': metrics['auc'],
+            'Gini': metrics['gini'],
+            'KS': metrics['ks'],
+            'Precision_at_10pct': round(p10, 4) if p10 else None,
+            'Lift_at_10pct': round(lift10, 2) if lift10 else None,
+        })
+
+        logger.info(
+            f"Summary | {period_name}: AUC={metrics['auc']:.4f}, "
+            f"Gini={metrics['gini']:.4f}, KS={metrics['ks']:.4f}"
+        )
+
+    summary_perf_df = pd.DataFrame(perf_rows)
+    importance_df = _feature_importance(model, selected_features, importance_type=importance_type)
+
+    return summary_perf_df, lift_tables, importance_df
+
+
+def evaluate_quarterly_chronological(
+    model: xgb.XGBClassifier,
+    selected_features: List[str],
+    datasets,  # DataSets namedtuple
+    target_column: str = 'target',
+    date_column: str = 'application_date',
+) -> pd.DataFrame:
+    """
+    Evaluate model chronologically by calendar quarter across all data splits.
+
+    Combines train + test + all OOT quarters, derives quarter from date_column,
+    and computes model metrics per quarter.
+
+    Args:
+        model: Trained XGBoost model.
+        selected_features: List of features used in the model.
+        datasets: DataSets namedtuple with .train, .test, .oot_quarters attributes.
+        target_column: Name of the target column.
+        date_column: Name of the date column.
+
+    Returns:
+        DataFrame sorted chronologically with columns:
+        Quarter, N_Samples, N_Bads, Bad_Rate, AUC, Gini, KS
+    """
+    parts = [datasets.train, datasets.test]
+    for df in datasets.oot_quarters.values():
+        parts.append(df)
+    all_data = pd.concat(parts, ignore_index=True)
+
+    all_data['_quarter'] = pd.to_datetime(all_data[date_column]).dt.to_period('Q')
+
+    rows = []
+    for quarter, group in all_data.groupby('_quarter', observed=False):
+        if len(group) < 30:
+            continue
+
+        y = group[target_column].values
+        if len(np.unique(y)) < 2:
+            continue
+
+        X = group[selected_features]
+        y_prob = model.predict_proba(X)[:, 1]
+        metrics = calculate_metrics(y, y_prob)
+
+        rows.append({
+            'Quarter': str(quarter),
+            'N_Samples': len(y),
+            'N_Bads': int(y.sum()),
+            'Bad_Rate': round(y.mean(), 4),
+            'AUC': metrics['auc'],
+            'Gini': metrics['gini'],
+            'KS': metrics['ks'],
+        })
+
+    result = pd.DataFrame(rows)
+    if len(result) > 0:
+        result = result.sort_values('Quarter').reset_index(drop=True)
+        logger.info(
+            f"Chronological evaluation: {len(result)} quarters, "
+            f"AUC range [{result['AUC'].min():.4f}, {result['AUC'].max():.4f}]"
+        )
+    return result
+
+
+def _compute_single_feature_quarterly_auc(feature, all_data, quarter_col, target_column):
+    """Compute univariate AUC per quarter for a single feature (module-level for joblib pickling)."""
+    result = {'Feature': feature}
+    for quarter, group in all_data.groupby(quarter_col, observed=False):
+        q_str = str(quarter)
+        if len(group) < 30:
+            result[q_str] = np.nan
+            continue
+
+        y = group[target_column].values
+        if len(np.unique(y)) < 2:
+            result[q_str] = np.nan
+            continue
+
+        scores = group[feature].values
+        if np.isnan(scores).all():
+            result[q_str] = np.nan
+            continue
+
+        try:
+            auc = roc_auc_score(y, scores)
+            if auc < 0.5:
+                auc = 1 - auc
+            result[q_str] = round(auc, 4)
+        except Exception:
+            result[q_str] = np.nan
+
+    return result
+
+
+def compute_variable_quarterly_auc(
+    features: List[str],
+    datasets,  # DataSets namedtuple
+    target_column: str = 'target',
+    date_column: str = 'application_date',
+    n_jobs: int = 1,
+) -> pd.DataFrame:
+    """
+    Compute univariate AUC per calendar quarter for each feature.
+
+    Args:
+        features: List of feature names to evaluate.
+        datasets: DataSets namedtuple with .train, .test, .oot_quarters attributes.
+        target_column: Name of the target column.
+        date_column: Name of the date column.
+        n_jobs: Number of parallel jobs for joblib.
+
+    Returns:
+        DataFrame with columns: Feature, <quarter columns>, Avg_AUC, Min_AUC, Trend_Slope.
+        Sorted by Avg_AUC descending.
+    """
+    parts = [datasets.train, datasets.test]
+    for df in datasets.oot_quarters.values():
+        parts.append(df)
+    all_data = pd.concat(parts, ignore_index=True)
+
+    quarter_col = '_quarter'
+    all_data[quarter_col] = pd.to_datetime(all_data[date_column]).dt.to_period('Q')
+
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(_compute_single_feature_quarterly_auc)(
+            feature, all_data[[feature, target_column, quarter_col]].copy(),
+            quarter_col, target_column,
+        )
+        for feature in features
+    )
+
+    result_df = pd.DataFrame(results)
+
+    quarter_cols = sorted([c for c in result_df.columns if c != 'Feature'])
+    result_df = result_df[['Feature'] + quarter_cols]
+
+    auc_values = result_df[quarter_cols]
+    result_df['Avg_AUC'] = auc_values.mean(axis=1).round(4)
+    result_df['Min_AUC'] = auc_values.min(axis=1).round(4)
+
+    from scipy.stats import linregress
+
+    def _trend_slope(row):
+        vals = row[quarter_cols].values.astype(float)
+        valid_mask = ~np.isnan(vals)
+        if valid_mask.sum() < 2:
+            return np.nan
+        y_vals = vals[valid_mask]
+        x_vals = np.arange(len(y_vals))
+        slope, _, _, _, _ = linregress(x_vals, y_vals)
+        return round(slope, 6)
+
+    result_df['Trend_Slope'] = result_df.apply(_trend_slope, axis=1)
+
+    result_df = result_df.sort_values('Avg_AUC', ascending=False).reset_index(drop=True)
+
+    logger.info(
+        f"Variable quarterly AUC: {len(features)} features, {len(quarter_cols)} quarters, "
+        f"Avg_AUC range [{result_df['Avg_AUC'].min():.4f}, {result_df['Avg_AUC'].max():.4f}]"
+    )
+
+    return result_df

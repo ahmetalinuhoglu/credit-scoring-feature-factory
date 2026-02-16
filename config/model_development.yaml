@@ -32,6 +32,11 @@ steps:
       - type: "quarterly"
       - type: "yearly"
       - type: "consecutive"
+  temporal_filter:
+    enabled: true
+    min_quarterly_auc: 0.52
+    max_auc_degradation: 0.05
+    min_trend_slope: -0.02
   correlation:
     enabled: true
     threshold: 0.80
@@ -88,6 +93,12 @@ evaluation:
     enabled: true
     n_iterations: 1000
     confidence_level: 0.95
+  subsegment:
+    enabled: true
+    columns: ["applicant_type"]
+  confusion_matrix:
+    enabled: true
+    thresholds: [0.1, 0.2, 0.3, 0.4, 0.5]
 
 validation:
   enabled: true
@@ -107,6 +118,7 @@ output:
   save_split_indices: true
   generate_excel: true
   save_correlation_matrix: true
+  generate_docs: true
 
 reproducibility:
   global_seed: 42

@@ -1,0 +1,72 @@
+# Classic Credit Risk Model Configuration (WoE + LogReg + Scorecard)
+
+data:
+  input_path: "data/sample/sample_features.parquet"
+  target_column: "target"
+  date_column: "application_date"
+  id_columns: ["application_id", "customer_id"]
+  exclude_columns: ["applicant_type"]
+
+splitting:
+  train_end_date: "2024-06-30"
+  test_size: 0.20
+  stratify: true
+
+woe:
+  n_bins: 10
+  min_bin_size: 0.05
+  monotonic: true
+  missing_bin: true
+  min_iv: 0.02
+  max_iv: 0.50
+
+logistic:
+  solver: "lbfgs"
+  penalty: "l2"
+  C: 1.0
+  max_iter: 1000
+  class_weight: "balanced"
+
+scorecard:
+  target_score: 600
+  target_odds: 20
+  pdo: 50
+
+evaluation:
+  metrics: ["auc", "gini", "ks"]
+  precision_at_k: [5, 10, 20]
+  n_deciles: 10
+  calculate_score_psi: true
+  importance_type: "gain"
+  calibration:
+    enabled: false
+    method: "platt"
+  shap:
+    enabled: false
+    max_samples: 500
+  bootstrap:
+    enabled: true
+    n_iterations: 1000
+    confidence_level: 0.95
+  subsegment:
+    enabled: false
+    columns: []
+  confusion_matrix:
+    enabled: true
+    thresholds: [0.1, 0.2, 0.3, 0.4, 0.5]
+
+output:
+  base_dir: "outputs/classic_model"
+  save_step_results: true
+  save_model: true
+  save_split_indices: false
+  generate_excel: true
+  save_correlation_matrix: false
+  generate_docs: false
+
+reproducibility:
+  global_seed: 42
+  n_jobs: -1
+  save_config: true
+  save_metadata: true
+  log_level: "DEBUG"
